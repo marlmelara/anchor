@@ -1,0 +1,24 @@
+version: "2"
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - bodyclose
+    - errorlint
+    - misspell
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+
+  exclusions:
+    rules:
+      # Table-driven tests routinely ignore errors from helpers that cannot
+      # fail in a test context.
+      - path: _test\.go
+        linters:
+          - errcheck

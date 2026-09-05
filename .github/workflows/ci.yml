@@ -1,0 +1,90 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  # Inside the runner there is nothing competing for the default ports.
+  ANCHOR_TEST_DATABASE_URL: postgres://anchor:anchor@localhost:5432/anchor?sslmode=disable
+  ANCHOR_DATABASE_URL: postgres://anchor:anchor@localhost:5432/anchor?sslmode=disable
+  ANCHOR_REDIS_URL: redis://localhost:6379/0
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: anchor
+          POSTGRES_PASSWORD: anchor
+          POSTGRES_DB: anchor
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U anchor -d anchor"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+          cache: true
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+      - name: Migrate
+        run: go run ./cmd/anchorctl migrate
+
+      # The race detector is not optional here: Anchor is a worker pool, and a
+      # data race in the claim path would show up as lost or duplicated runs.
+      - name: Test
+        run: go test -race -count=1 ./...
+
+      # Projection drift is a defect, so CI asserts the projections still agree
+      # with the fold after the whole suite has written to the database.
+      - name: Verify projections match the event log
+        run: go run ./cmd/anchorctl rebuild -verify
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+          cache: true
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          args: --timeout=5m

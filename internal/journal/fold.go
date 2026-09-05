@@ -512,3 +512,40 @@ func (s *RunState) Terminal() bool {
 // applied event. Agent-visible code must call this rather than time.Now(), so a
 // replay observes exactly the clock the original run observed.
 func (s *RunState) Now() time.Time { return s.LastEventAt }
+
+// Clone returns a deep copy of the state.
+//
+// The append path folds candidate events into a clone first: if a candidate
+// would corrupt the state, the caller finds out before anything reaches the
+// database, and the live state the worker is holding is left untouched.
+func (s *RunState) Clone() *RunState {
+	if s == nil {
+		return nil
+	}
+	c := *s
+	c.Steps = make([]*StepState, len(s.Steps))
+	for i, st := range s.Steps {
+		cp := *st
+		if st.RetryDelaysMS != nil {
+			cp.RetryDelaysMS = append([]int64(nil), st.RetryDelaysMS...)
+		}
+		c.Steps[i] = &cp
+	}
+	// Times are values behind pointers; copy them so a mutation of the clone
+	// cannot reach back into the original.
+	c.StartedAt = clonePtr(s.StartedAt)
+	c.FinishedAt = clonePtr(s.FinishedAt)
+	for i, st := range s.Steps {
+		c.Steps[i].StartedAt = clonePtr(st.StartedAt)
+		c.Steps[i].FinishedAt = clonePtr(st.FinishedAt)
+	}
+	return &c
+}
+
+func clonePtr[T any](p *T) *T {
+	if p == nil {
+		return nil
+	}
+	v := *p
+	return &v
+}

@@ -8,7 +8,7 @@ REDIS ?= redis://localhost:6380/0
 export ANCHOR_DATABASE_URL := $(DSN)
 export ANCHOR_REDIS_URL := $(REDIS)
 
-.PHONY: help up down migrate test test-unit test-race lint fmt vet build clean rebuild verify psql redis-cli
+.PHONY: help up down migrate test test-unit test-race lint tidy-check ci fmt vet build clean rebuild verify psql redis-cli cover
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
@@ -54,8 +54,20 @@ fmt: ## Format all Go source
 vet: ## Run go vet
 	go vet ./...
 
-lint: fmt vet ## Format and vet
+lint: ## Run gofmt, vet, and golangci-lint exactly as CI does
 	@test -z "$$(gofmt -l .)" || { echo "unformatted files:"; gofmt -l .; exit 1; }
+	go vet ./...
+	@command -v golangci-lint >/dev/null 2>&1 \
+		|| { echo "golangci-lint not installed: brew install golangci-lint"; exit 1; }
+	golangci-lint run --timeout=5m
+
+tidy-check: ## Fail if go.mod or go.sum are not tidy
+	go mod tidy
+	git diff --exit-code go.mod go.sum
+
+ci: tidy-check lint up migrate ## Run everything CI runs, locally
+	ANCHOR_TEST_DATABASE_URL="$(DSN)" go test -race -count=1 ./...
+	go run ./cmd/anchorctl rebuild -verify
 
 build: ## Build all binaries into ./bin
 	go build -o bin/ ./cmd/...

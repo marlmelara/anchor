@@ -45,8 +45,16 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.27'
+          # Read the version from go.mod so CI and the module can never drift.
+          go-version-file: go.mod
           cache: true
+
+      # go.mod and go.sum are easy to leave behind when commits stage explicit
+      # paths. This catches that before it becomes a mystery build failure.
+      - name: Check go.mod and go.sum are tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
 
       - name: Check formatting
         run: |
@@ -82,9 +90,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.27'
+          go-version-file: go.mod
           cache: true
-      - uses: golangci/golangci-lint-action@v6
+      # v8 of the action tracks golangci-lint v2, which is what .golangci.yml
+      # is written against. The v6 action pins the v1 series, and a v1 binary
+      # built with an older Go refuses to lint a module targeting a newer one.
+      # The version is pinned rather than "latest" so a linter release cannot
+      # turn a green branch red on its own.
+      - uses: golangci/golangci-lint-action@v8
         with:
-          version: latest
+          version: v2.13.2
           args: --timeout=5m

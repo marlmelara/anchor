@@ -70,6 +70,18 @@ func (s *Store) Pool() *pgxpool.Pool { return s.pool }
 // Close releases the pool.
 func (s *Store) Close() { s.pool.Close() }
 
+// pgTimestamp normalises a time to what Postgres timestamptz round-trips
+// exactly: UTC, truncated to microseconds.
+//
+// Anything Anchor compares -- a worker's in-memory state against the same run
+// folded from the log, a replay's event sequence against the original -- depends
+// on stored and in-memory timestamps being the same value, not merely the same
+// instant. Truncate also drops the monotonic clock reading, which has no meaning
+// once a time has been through the database.
+func pgTimestamp(t time.Time) time.Time {
+	return t.UTC().Truncate(time.Microsecond)
+}
+
 // isUniqueViolation reports whether err is a Postgres unique-constraint
 // violation on the named constraint.
 func isUniqueViolation(err error, constraint string) bool {

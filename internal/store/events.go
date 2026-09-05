@@ -60,7 +60,13 @@ func (s *Store) AppendTx(ctx context.Context, tx pgx.Tx, st *journal.RunState, p
 		return st.Clone(), nil
 	}
 
-	now := s.Now()
+	// Stamp at the precision the database can actually keep. Postgres
+	// timestamptz stores microseconds; time.Now() carries nanoseconds. Without
+	// this truncation the state a worker holds in memory differs from the state
+	// folded back out of the log by a few hundred nanoseconds -- which makes
+	// the fold no longer the single source of truth, and would show up much
+	// later as unexplainable replay divergence.
+	now := pgTimestamp(s.Now())
 	next := st.Clone()
 
 	events := make([]journal.Event, len(pending))

@@ -499,3 +499,57 @@ func TestStoreClockIsInjectable(t *testing.T) {
 		t.Errorf("Now() = %v, want %v", loaded.Now(), pinned)
 	}
 }
+
+// Postgres timestamptz keeps microseconds; Go's time.Now() carries nanoseconds.
+// If the writer stamps an event at nanosecond precision, the state it holds in
+// memory stops being equal to the same run folded back out of the log, and the
+// fold is no longer the single source of truth.
+//
+// The clock here is pinned to a time with non-zero nanoseconds so this fails
+// regardless of the host's clock granularity -- the original bug was invisible
+// on macOS and only appeared on Linux.
+func TestEventTimestampsSurviveTheRoundTrip(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	nanos := time.Date(2026, 3, 1, 12, 0, 0, 123456789, time.UTC)
+	s.Now = func() time.Time { return nanos }
+
+	version := seedAgent(t, s, "research")
+	st := submit(t, s, "research", version)
+	if err := s.Append(ctx, st, store.PendingEvent{
+		Type:    journal.TypeRunStarted,
+		Payload: journal.RunStartedPayload{Versioned: v(), WorkerID: "w-1"},
+	}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+
+	loaded, err := s.LoadState(ctx, st.RunID)
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+
+	if !st.CreatedAt.Equal(loaded.CreatedAt) {
+		t.Errorf("CreatedAt does not survive the round trip:\n writer: %s\n    log: %s",
+			st.CreatedAt.Format(time.RFC3339Nano), loaded.CreatedAt.Format(time.RFC3339Nano))
+	}
+
+	// The stamped value must already be at storable precision, not merely
+	// compare equal after the database rounds it.
+	want := nanos.Truncate(time.Microsecond)
+	if !st.CreatedAt.Equal(want) {
+		t.Errorf("writer stamped %s, want it truncated to %s",
+			st.CreatedAt.Format(time.RFC3339Nano), want.Format(time.RFC3339Nano))
+	}
+	if st.CreatedAt.Nanosecond()%1000 != 0 {
+		t.Errorf("stamped time has sub-microsecond precision Postgres cannot store: %s",
+			st.CreatedAt.Format(time.RFC3339Nano))
+	}
+
+	// Whole-state equality is the property that actually matters.
+	inMem, _ := json.Marshal(st)
+	fromLog, _ := json.Marshal(loaded)
+	if string(inMem) != string(fromLog) {
+		t.Errorf("writer state diverged from the folded log:\n writer: %s\n    log: %s", inMem, fromLog)
+	}
+}

@@ -7,7 +7,8 @@ services:
       POSTGRES_PASSWORD: anchor
       POSTGRES_DB: anchor
     ports:
-      - "5432:5432"
+      # 5433 on the host: 5432 is taken by another project on this machine.
+      - "5433:5432"
     # max_connections is raised because every worker goroutine holds a pooled
     # connection for the duration of a claim transaction (SELECT ... FOR UPDATE
     # SKIP LOCKED), so pool size scales with worker count, not request rate.
@@ -24,7 +25,7 @@ services:
     image: redis:7-alpine
     container_name: anchor-redis
     ports:
-      - "6379:6379"
+      - "6380:6379"
     command: redis-server --save "" --appendonly no
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]

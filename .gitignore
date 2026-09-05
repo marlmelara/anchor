@@ -1,0 +1,21 @@
+# build output
+/bin/
+/dist/
+*.test
+*.out
+coverage.*
+
+# local env
+.env
+.env.local
+
+# tooling
+.claude/
+.DS_Store
+.idea/
+.vscode/
+
+# node (sdk / trace-viewer)
+node_modules/
+.next/
+*.tsbuildinfo

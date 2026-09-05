@@ -523,13 +523,19 @@ func (s *RunState) Clone() *RunState {
 		return nil
 	}
 	c := *s
-	c.Steps = make([]*StepState, len(s.Steps))
-	for i, st := range s.Steps {
-		cp := *st
-		if st.RetryDelaysMS != nil {
-			cp.RetryDelaysMS = append([]int64(nil), st.RetryDelaysMS...)
+	// Preserve nil-ness rather than normalising to an empty slice. A run with
+	// no steps folds to a nil Steps, and a clone that turned it into []
+	// would make the writer's state and the same run folded from the log
+	// unequal -- identical in meaning, different on the wire.
+	if s.Steps != nil {
+		c.Steps = make([]*StepState, len(s.Steps))
+		for i, st := range s.Steps {
+			cp := *st
+			if st.RetryDelaysMS != nil {
+				cp.RetryDelaysMS = append([]int64(nil), st.RetryDelaysMS...)
+			}
+			c.Steps[i] = &cp
 		}
-		c.Steps[i] = &cp
 	}
 	// Times are values behind pointers; copy them so a mutation of the clone
 	// cannot reach back into the original.

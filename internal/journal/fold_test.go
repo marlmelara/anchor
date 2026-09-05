@@ -633,3 +633,65 @@ func TestIncrementalApplyMatchesFullFold(t *testing.T) {
 		t.Errorf("incremental apply diverged from full fold:\n  full: %s\n  incr: %s", jf, ji)
 	}
 }
+
+// A clone must be indistinguishable from the original, including the
+// difference between a nil slice and an empty one. The append path clones the
+// state before folding candidate events into it, so a clone that normalised
+// nil to [] would make a worker's in-memory state unequal to the same run
+// folded from the log -- the same value, encoded differently.
+func TestCloneIsIndistinguishableFromTheOriginal(t *testing.T) {
+	cases := map[string][]Event{
+		"no steps": started(t).events(),
+		"one step": started(t).add(TypeStepScheduled, StepScheduledPayload{
+			Versioned: v(), StepIndex: 0, Kind: StepKindModel, IdempotencyKey: "k0",
+		}).events(),
+	}
+	for name, events := range cases {
+		t.Run(name, func(t *testing.T) {
+			original := mustFold(t, events)
+			clone := original.Clone()
+
+			jo, err := json.Marshal(original)
+			if err != nil {
+				t.Fatalf("marshal original: %v", err)
+			}
+			jc, err := json.Marshal(clone)
+			if err != nil {
+				t.Fatalf("marshal clone: %v", err)
+			}
+			if string(jo) != string(jc) {
+				t.Errorf("clone differs from original:\noriginal: %s\n   clone: %s", jo, jc)
+			}
+			if (original.Steps == nil) != (clone.Steps == nil) {
+				t.Errorf("clone changed Steps nil-ness: original nil=%v, clone nil=%v",
+					original.Steps == nil, clone.Steps == nil)
+			}
+		})
+	}
+}
+
+// Mutating a clone must not reach back into the original -- the append path
+// depends on the caller's state being untouched when an append fails.
+func TestCloneIsDeep(t *testing.T) {
+	original := mustFold(t, started(t).add(TypeStepScheduled, StepScheduledPayload{
+		Versioned: v(), StepIndex: 0, Kind: StepKindModel, IdempotencyKey: "k0",
+	}).events())
+
+	clone := original.Clone()
+	clone.Steps[0].Status = StepStatusCompleted
+	clone.Steps[0].Tokens = 999
+	clone.TokensUsed = 999
+	if clone.StartedAt != nil {
+		*clone.StartedAt = time.Unix(0, 0)
+	}
+
+	if original.Steps[0].Status != StepStatusScheduled {
+		t.Errorf("mutating the clone changed the original's step status: %q", original.Steps[0].Status)
+	}
+	if original.Steps[0].Tokens != 0 || original.TokensUsed != 0 {
+		t.Error("mutating the clone changed the original's accounting")
+	}
+	if original.StartedAt != nil && original.StartedAt.Equal(time.Unix(0, 0)) {
+		t.Error("mutating the clone's StartedAt changed the original's")
+	}
+}

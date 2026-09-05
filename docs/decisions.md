@@ -107,6 +107,32 @@ compared.
 
 ---
 
+### Event timestamps truncated to microseconds
+
+**Chose:** `AppendTx` stamps every event with `t.UTC().Truncate(time.Microsecond)`.
+
+**Why:** Postgres `timestamptz` stores microseconds; Go's `time.Now()` carries
+nanoseconds. Without truncation the state a worker holds in memory differs from
+the same run folded back out of the log by a few hundred nanoseconds. The values
+are the same instant but not the same value, so any equality check between live
+state and recovered state fails, and the fold stops being the single source of
+truth in practice while still looking like it in principle.
+
+This was found by CI rather than by local testing: macOS clock granularity
+usually leaves the nanosecond digits at zero, so the bug was invisible on a
+laptop and immediate on Linux. Anything compared byte-for-byte has to be
+normalised at the point it is created, not at the point it is compared.
+
+**Cost:** sub-microsecond ordering is not representable. It does not matter,
+because ordering within a run comes from `seq`, never from the timestamp.
+
+**Related:** `RunState.Clone` preserves the difference between a nil and an
+empty `Steps` slice for the same reason — a run with no steps folds to nil, and
+a clone that normalised it to `[]` produced state that was equal in meaning and
+unequal on the wire.
+
+---
+
 ### Idempotency key = `sha256(run_id || step_index || canonical_json(input))`
 
 **Chose:** a derived key, globally unique in `steps`.

@@ -1,5 +1,7 @@
 # Anchor
 
+[![ci](https://github.com/marlmelara/anchor/actions/workflows/ci.yml/badge.svg)](https://github.com/marlmelara/anchor/actions/workflows/ci.yml)
+
 **A durable execution runtime for AI agents.**
 
 An agent run is a long, expensive, failure-prone sequence of model calls and tool
@@ -42,6 +44,7 @@ Requires Go 1.27+ and Docker.
 make up        # start Postgres and Redis, wait for health
 make migrate   # apply the schema
 make test      # run everything, including the database tests
+make ci        # run exactly what CI runs, before you push
 ```
 
 Submit a run:

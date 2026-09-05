@@ -76,11 +76,19 @@ func upsertSteps(ctx context.Context, tx pgx.Tx, st *journal.RunState, indexes [
 		)
 	}
 	results := tx.SendBatch(ctx, batch)
-	defer results.Close()
 	for range indexes {
 		if _, err := results.Exec(); err != nil {
+			// Close before returning, or the connection is handed back to the
+			// pool with unread results still queued on it. The close error is
+			// discarded because err is the one that explains the failure.
+			_ = results.Close()
 			return fmt.Errorf("upsert steps: %w", err)
 		}
+	}
+	// Close is not just cleanup: it reports errors from any result the loop
+	// above did not read, so dropping it would hide a failed upsert.
+	if err := results.Close(); err != nil {
+		return fmt.Errorf("close step batch: %w", err)
 	}
 	return nil
 }

@@ -41,7 +41,12 @@ const (
 	TypeRunCancelled       EventType = "RunCancelled"
 	TypeRunCompleted       EventType = "RunCompleted"
 	TypeRunFailed          EventType = "RunFailed"
+	TypeRunNeedsReview     EventType = "RunNeedsReview"
 )
+
+// FirstSeq is the seq of a run's first event. Sequence numbers are 1-based, so
+// a zero seq is always an uninitialised value rather than a real event.
+const FirstSeq = 1
 
 // Event is one row of run_events.
 //
@@ -235,8 +240,20 @@ type RunFailedPayload struct {
 	Error string `json:"error"`
 	// StepIndex is the step that killed the run, when one did.
 	StepIndex *int `json:"step_index,omitempty"`
-	// NeedsReview promotes the run to needs_review instead of failed.
-	NeedsReview bool `json:"needs_review"`
+}
+
+// RunNeedsReviewPayload halts a run for a human instead of failing it.
+//
+// It is its own terminal event rather than a flag on RunFailed because the two
+// mean different things operationally: a failed run is finished and understood,
+// while a run needing review is finished and NOT understood -- nobody knows
+// whether its last side effect landed. Giving it a distinct type means the
+// trace viewer and any alerting can tell them apart without reading a payload.
+type RunNeedsReviewPayload struct {
+	Versioned
+	Reason string `json:"reason"`
+	// StepIndex is the step whose outcome is unknown.
+	StepIndex *int `json:"step_index,omitempty"`
 }
 
 // ---------------------------------------------------------------------------

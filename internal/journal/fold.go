@@ -102,6 +102,9 @@ type RunState struct {
 	// NextSeq is the seq a writer must use for the next append. It is the whole
 	// of Anchor's concurrency control: the writer computes it from the state it
 	// folded, and UNIQUE (run_id, seq) rejects the loser of any race.
+	//
+	// Zero means nothing has been applied yet; use NextAppendSeq rather than
+	// reading this field directly, since the first real seq is FirstSeq.
 	NextSeq int `json:"next_seq"`
 
 	// LastEventAt is the created_at of the newest applied event. Agent code
@@ -110,10 +113,22 @@ type RunState struct {
 	LastEventAt time.Time `json:"last_event_at"`
 }
 
+// NextAppendSeq returns the seq the next appended event must carry.
+//
+// Sequence numbers are 1-based, so a freshly constructed RunState (NextSeq 0)
+// reports FirstSeq. Every writer goes through here so the base is defined in
+// exactly one place.
+func (s *RunState) NextAppendSeq() int {
+	if s.NextSeq == 0 {
+		return FirstSeq
+	}
+	return s.NextSeq
+}
+
 // Fold replays a run's events in order and returns the resulting state.
 //
 // events must be ordered by seq and must be the complete prefix of the run
-// starting at seq 0. Fold is strict about this: a gap, a repeat, or a mismatched
+// starting at FirstSeq. Fold is strict about this: a gap, a repeat, or a mismatched
 // run_id is a corrupt log, and returning a plausible-looking state from a
 // corrupt log is far worse than failing loudly.
 func Fold(events []Event) (*RunState, error) {
@@ -165,6 +180,8 @@ func (s *RunState) Apply(e Event) error {
 		err = s.applyRunCompleted(e)
 	case TypeRunFailed:
 		err = s.applyRunFailed(e)
+	case TypeRunNeedsReview:
+		err = s.applyRunNeedsReview(e)
 	default:
 		// An unknown type means this build is older than the log. Guessing
 		// would produce a state that silently omits whatever that event did.
@@ -182,21 +199,27 @@ func (s *RunState) Apply(e Event) error {
 // checkEnvelope enforces the invariants that hold for every event regardless of
 // type: correct run, correct position, and no writes past a terminal state.
 func (s *RunState) checkEnvelope(e Event) error {
-	if s.NextSeq == 0 {
+	// A zero NextSeq means nothing has been folded yet. Computing the expected
+	// seq into a local rather than mutating s keeps a rejected event from
+	// leaving the state half-advanced.
+	expected := s.NextAppendSeq()
+	fresh := s.NextSeq == 0
+
+	if fresh {
 		if e.Type != TypeRunSubmitted {
 			return fmt.Errorf("first event must be %s, got %s", TypeRunSubmitted, e.Type)
 		}
 	} else {
 		if e.Type == TypeRunSubmitted {
-			return fmt.Errorf("seq %d: %s may only appear at seq 0", e.Seq, TypeRunSubmitted)
+			return fmt.Errorf("seq %d: %s may only appear at seq %d", e.Seq, TypeRunSubmitted, FirstSeq)
 		}
 		if e.RunID != s.RunID {
 			return fmt.Errorf("seq %d: event belongs to run %s, folding run %s", e.Seq, e.RunID, s.RunID)
 		}
 	}
 
-	if e.Seq != s.NextSeq {
-		return fmt.Errorf("out-of-order event: expected seq %d, got %d (%s)", s.NextSeq, e.Seq, e.Type)
+	if e.Seq != expected {
+		return fmt.Errorf("out-of-order event: expected seq %d, got %d (%s)", expected, e.Seq, e.Type)
 	}
 
 	// RunCompleted and RunFailed are hard-terminal: nothing may follow them.
@@ -208,7 +231,7 @@ func (s *RunState) checkEnvelope(e Event) error {
 		return fmt.Errorf("run already terminal (%s); cannot apply %s", s.Status, e.Type)
 	case RunStatusCancelled:
 		switch e.Type {
-		case TypeStepFailed, TypeRunFailed:
+		case TypeStepFailed, TypeRunFailed, TypeRunNeedsReview:
 			// permitted: the aborted in-flight step reports itself
 		default:
 			return fmt.Errorf("run cancelled; cannot apply %s", e.Type)
@@ -453,14 +476,25 @@ func (s *RunState) applyRunFailed(e Event) error {
 	if err != nil {
 		return err
 	}
-	if p.NeedsReview {
-		s.Status = RunStatusNeedsReview
-	} else {
-		s.Status = RunStatusFailed
-	}
+	s.Status = RunStatusFailed
 	if p.Error != "" {
 		s.Error = p.Error
 	}
+	t := e.CreatedAt
+	s.FinishedAt = &t
+	return nil
+}
+
+func (s *RunState) applyRunNeedsReview(e Event) error {
+	p, err := decodePayload[RunNeedsReviewPayload](e.Payload)
+	if err != nil {
+		return err
+	}
+	if p.Reason == "" {
+		return fmt.Errorf("reason is required: a run halted for a human must say what the human has to check")
+	}
+	s.Status = RunStatusNeedsReview
+	s.Error = p.Reason
 	t := e.CreatedAt
 	s.FinishedAt = &t
 	return nil

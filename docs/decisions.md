@@ -213,6 +213,73 @@ be respected by anything that appends.
 
 ---
 
+### `run_events` holds no foreign key to `runs`
+
+**Chose:** the log references nothing. `queue` and `leases` also dropped their
+foreign keys to `runs`.
+
+**Alternative:** the obvious one — `run_events.run_id REFERENCES runs(id)`,
+which is what was built first.
+
+**Why:** direction of dependency has to match the architecture. `runs` is a
+cache computed from `run_events`; a source of truth that references its own
+cache cannot exist without it, and more concretely the cache can then never be
+dropped and recomputed — which made the M1 acceptance criterion ("drop `runs`
+and `steps`, rebuild reproduces them") impossible to satisfy. `queue` and
+`leases` had the same inversion: they are keyed by run id, but that id is the
+log's identity, not the projection row's.
+
+**Cost:** the database no longer rejects an event written for a run id that was
+never submitted. That check moves into the fold, which refuses any log whose
+first event is not `RunSubmitted` — a stronger check, but one that now has to be
+*run* rather than being structurally impossible to violate.
+
+**Kept:** `steps` still references `runs`. Both are projections rebuilt in the
+same transaction, so the constraint is meaningful — but as `DEFERRABLE INITIALLY
+DEFERRED`, so the delete-then-reinsert is legal mid-transaction and still
+checked at `COMMIT`.
+
+---
+
+### Sequence numbers are 1-based
+
+**Chose:** the first event of a run is `seq` 1. `journal.FirstSeq` names it and
+`RunState.NextAppendSeq()` is the only way writers obtain the next value.
+
+**Alternative:** 0-based, which was built first.
+
+**Why:** the build spec specifies it, and it makes zero an unambiguous "not
+set". A fresh `RunState` can report whether it has folded anything without
+carrying a separate boolean, and a `seq` of 0 arriving from anywhere is
+detectably wrong rather than being a legitimate first event.
+
+**Cost:** it cannot be changed again. Existing events cannot be renumbered —
+`run_events` is append-only and the trigger rejects `UPDATE` by design — so the
+migration can only detect legacy rows and refuse. This was free here because
+Anchor has no production data; with real data the only option would have been to
+teach the fold both bases permanently.
+
+---
+
+### `RunNeedsReview` is its own terminal event
+
+**Chose:** a distinct event type, with a required `Reason`.
+
+**Alternative:** a `needs_review` boolean on `RunFailed`, which was built first.
+
+**Why:** the two states mean different things operationally. A failed run is
+finished and understood. A run needing review is finished and *not* understood —
+nobody knows whether its last side effect landed. Alerting, the run list, and
+anything paging a human must tell them apart without parsing a payload, and a
+boolean buried in JSON is the wrong place for a distinction that changes who
+gets woken up.
+
+**Cost:** one more event type in the fold's switch and in every exhaustive
+handler, forever. Event types are the one part of an event-sourced system that
+can never be removed.
+
+---
+
 ### Postgres `SKIP LOCKED` instead of Redis or Kafka for the queue
 
 **Chose:** `SELECT ... FOR UPDATE SKIP LOCKED` over a `queue` table.

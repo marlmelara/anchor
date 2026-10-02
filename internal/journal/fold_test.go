@@ -2,6 +2,7 @@ package journal
 
 import (
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -25,7 +26,7 @@ type logBuilder struct {
 
 func newLog(t *testing.T) *logBuilder {
 	t.Helper()
-	return &logBuilder{t: t, runID: uuid.MustParse("11111111-1111-4111-8111-111111111111")}
+	return &logBuilder{t: t, seq: FirstSeq, runID: uuid.MustParse("11111111-1111-4111-8111-111111111111")}
 }
 
 // add appends an event with the next seq. It marshals through MarshalPayload so
@@ -37,12 +38,12 @@ func (b *logBuilder) add(typ EventType, p any) *logBuilder {
 		b.t.Fatalf("marshal %s: %v", typ, err)
 	}
 	b.out = append(b.out, Event{
-		ID:        int64(b.seq + 1),
+		ID:        int64(b.seq),
 		RunID:     b.runID,
 		Seq:       b.seq,
 		Type:      typ,
 		Payload:   raw,
-		CreatedAt: baseTime.Add(time.Duration(b.seq) * time.Second),
+		CreatedAt: baseTime.Add(time.Duration(b.seq-FirstSeq) * time.Second),
 	})
 	b.seq++
 	return b
@@ -53,12 +54,12 @@ func (b *logBuilder) add(typ EventType, p any) *logBuilder {
 func (b *logBuilder) addRaw(typ EventType, payload string) *logBuilder {
 	b.t.Helper()
 	b.out = append(b.out, Event{
-		ID:        int64(b.seq + 1),
+		ID:        int64(b.seq),
 		RunID:     b.runID,
 		Seq:       b.seq,
 		Type:      typ,
 		Payload:   json.RawMessage(payload),
-		CreatedAt: baseTime.Add(time.Duration(b.seq) * time.Second),
+		CreatedAt: baseTime.Add(time.Duration(b.seq-FirstSeq) * time.Second),
 	})
 	b.seq++
 	return b
@@ -160,8 +161,8 @@ func TestFoldCompleteModelRun(t *testing.T) {
 	if string(st.ModelResponse) != `{"text":"rayleigh scattering"}` {
 		t.Errorf("recorded response not preserved: %s", st.ModelResponse)
 	}
-	if s.NextSeq != 6 {
-		t.Errorf("NextSeq = %d, want 6", s.NextSeq)
+	if s.NextSeq != 7 {
+		t.Errorf("NextSeq = %d, want 7 (six events, 1-based)", s.NextSeq)
 	}
 	if !s.Terminal() {
 		t.Error("Terminal() = false, want true")
@@ -246,19 +247,19 @@ func TestFoldRejectsSecondRunSubmitted(t *testing.T) {
 	b := submitted(t).add(TypeRunSubmitted, RunSubmittedPayload{
 		Versioned: v(), TenantID: "acme", AgentName: "research",
 	})
-	foldError(t, b.events(), "may only appear at seq 0")
+	foldError(t, b.events(), "may only appear at seq 1")
 }
 
 func TestFoldRejectsSeqGap(t *testing.T) {
 	events := started(t).events()
 	events[1].Seq = 5 // a hole in the log
-	foldError(t, events, "expected seq 1, got 5")
+	foldError(t, events, "expected seq 2, got 5")
 }
 
 func TestFoldRejectsRepeatedSeq(t *testing.T) {
 	events := started(t).events()
-	events[1].Seq = 0
-	foldError(t, events, "expected seq 1, got 0")
+	events[1].Seq = 1
+	foldError(t, events, "expected seq 2, got 1")
 }
 
 func TestFoldRejectsForeignRunID(t *testing.T) {
@@ -467,8 +468,8 @@ func TestFoldNeedsReviewOnAmbiguousNonIdempotentTool(t *testing.T) {
 			Retryable:   false,
 			NeedsReview: true,
 		}).
-		add(TypeRunFailed, RunFailedPayload{
-			Versioned: v(), Error: "halted for review", NeedsReview: true,
+		add(TypeRunNeedsReview, RunNeedsReviewPayload{
+			Versioned: v(), Reason: "charge_card may or may not have been applied",
 		})
 
 	s := mustFold(t, b.events())
@@ -693,5 +694,81 @@ func TestCloneIsDeep(t *testing.T) {
 	}
 	if original.StartedAt != nil && original.StartedAt.Equal(time.Unix(0, 0)) {
 		t.Error("mutating the clone's StartedAt changed the original's")
+	}
+}
+
+// Sequence numbers are 1-based. A zero seq is therefore always an
+// uninitialised value rather than a real event, which makes "has this state
+// folded anything yet?" answerable without a separate flag.
+func TestSeqIsOneBased(t *testing.T) {
+	fresh := &RunState{}
+	if got := fresh.NextAppendSeq(); got != FirstSeq {
+		t.Errorf("fresh state NextAppendSeq() = %d, want %d", got, FirstSeq)
+	}
+
+	events := submitted(t).events()
+	if events[0].Seq != FirstSeq {
+		t.Errorf("first event seq = %d, want %d", events[0].Seq, FirstSeq)
+	}
+
+	s := mustFold(t, events)
+	if s.NextSeq != FirstSeq+1 {
+		t.Errorf("NextSeq after one event = %d, want %d", s.NextSeq, FirstSeq+1)
+	}
+}
+
+func TestFoldRejectsSeqZero(t *testing.T) {
+	events := submitted(t).events()
+	events[0].Seq = 0
+	foldError(t, events, "expected seq 1, got 0")
+}
+
+// RunNeedsReview is its own terminal event rather than a flag on RunFailed: a
+// failed run is finished and understood, a run needing review is finished and
+// NOT understood. Alerting and the trace viewer have to tell them apart.
+func TestFoldRunNeedsReviewIsItsOwnTerminalState(t *testing.T) {
+	b := started(t).add(TypeRunNeedsReview, RunNeedsReviewPayload{
+		Versioned: v(), Reason: "send_email may have fired before the worker died",
+	})
+	s := mustFold(t, b.events())
+
+	if s.Status != RunStatusNeedsReview {
+		t.Errorf("status = %q, want needs_review", s.Status)
+	}
+	if s.Error == "" {
+		t.Error("Error is empty; a run halted for a human must say what to check")
+	}
+	if !s.Terminal() {
+		t.Error("Terminal() = false, want true")
+	}
+}
+
+func TestFoldRunNeedsReviewRequiresAReason(t *testing.T) {
+	b := started(t).add(TypeRunNeedsReview, RunNeedsReviewPayload{Versioned: v()})
+	foldError(t, b.events(), "reason is required")
+}
+
+// The M1 acceptance criterion is that fold tests cover every event type. This
+// test fails when a type is added without a fold test, so the criterion stays
+// true instead of being true once.
+func TestEveryEventTypeHasFoldCoverage(t *testing.T) {
+	all := []EventType{
+		TypeRunSubmitted, TypeRunStarted, TypeStepScheduled,
+		TypeModelCallStarted, TypeModelCallCompleted,
+		TypeToolCallStarted, TypeToolCallCompleted,
+		TypeStepFailed, TypeRetryScheduled, TypeBudgetExceeded,
+		TypeRunCancelled, TypeRunCompleted, TypeRunFailed, TypeRunNeedsReview,
+	}
+
+	source, err := os.ReadFile("fold_test.go")
+	if err != nil {
+		t.Fatalf("read own source: %v", err)
+	}
+	for _, typ := range all {
+		// Look for the event being applied in a test, not merely named.
+		needle := "add(Type" + string(typ) + ","
+		if !strings.Contains(string(source), needle) {
+			t.Errorf("event type %s is never folded in a test; add one", typ)
+		}
 	}
 }

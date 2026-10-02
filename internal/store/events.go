@@ -77,7 +77,7 @@ func (s *Store) AppendTx(ctx context.Context, tx pgx.Tx, st *journal.RunState, p
 		}
 		events[i] = journal.Event{
 			RunID:     runIDFor(next, st),
-			Seq:       next.NextSeq,
+			Seq:       next.NextAppendSeq(),
 			Type:      p.Type,
 			Payload:   raw,
 			CreatedAt: now,
@@ -94,8 +94,10 @@ func (s *Store) AppendTx(ctx context.Context, tx pgx.Tx, st *journal.RunState, p
 		return nil, err
 	}
 
-	// runs is written first: run_events has a foreign key to it, so the very
-	// first append has to create the row it points at.
+	// Projection first, then the log. The ordering is no longer forced by a
+	// foreign key -- run_events deliberately has none -- but writing the
+	// projection inside the same transaction is what keeps the two from
+	// drifting.
 	if err := upsertRun(ctx, tx, next); err != nil {
 		return nil, err
 	}

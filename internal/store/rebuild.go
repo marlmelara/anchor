@@ -51,10 +51,19 @@ func (s *Store) RebuildRun(ctx context.Context, runID uuid.UUID, verify bool) (*
 	}
 
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		// Delete the projection rows, then rebuild them from the fold. The
-		// event log is never touched -- a trigger would reject it anyway.
+		// Both projections are deleted outright, not upserted over. Upserting
+		// would hide the failure this command exists to detect: a column the
+		// fold no longer writes would keep its stale value forever.
+		//
+		// Deleting the runs row is only possible because run_events has no
+		// foreign key to it, and because steps, queue and leases reference it
+		// through DEFERRABLE INITIALLY DEFERRED constraints -- so the row can be
+		// absent mid-transaction and must be back by COMMIT.
 		if _, err := tx.Exec(ctx, `DELETE FROM steps WHERE run_id = $1`, runID); err != nil {
 			return fmt.Errorf("clear steps: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM runs WHERE id = $1`, runID); err != nil {
+			return fmt.Errorf("clear run: %w", err)
 		}
 		if err := upsertRun(ctx, tx, st); err != nil {
 			return err

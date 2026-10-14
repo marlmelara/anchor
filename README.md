@@ -32,7 +32,9 @@ partitioned log.
 
 ## Status
 
-Milestone 1 of 8 is complete. See [Milestones](#milestones).
+Milestones 1 and 2 of 8 are complete: runs are journaled, claimed from a
+`SKIP LOCKED` queue, and executed by a worker pool against a mock provider,
+with idempotency keys and retries. See [Milestones](#milestones).
 
 ---
 
@@ -47,12 +49,32 @@ make test      # run everything, including the database tests
 make ci        # run exactly what CI runs, before you push
 ```
 
-Submit a run:
+Run it:
 
 ```bash
-echo '{"agent":"research","v":1,"nodes":[]}' > /tmp/research.json
-go run ./cmd/anchorctl agent-register -name research -file /tmp/research.json
-go run ./cmd/anchorctl submit -agent research -input '{"q":"why is the sky blue"}'
+go run ./cmd/anchor-server &
+go run ./cmd/anchor-worker -pool 4 &
+```
+
+Register an agent and submit a run:
+
+```bash
+curl -sX POST localhost:8080/v1/agents -d '{
+  "name": "two-step",
+  "graph": {"agent":"two-step","v":1,"nodes":[
+    {"id":"n1","type":"model_call","model":"mock","prompt":"Answer: {{input.topic}}"},
+    {"id":"n2","type":"tool_call","tool":"echo","input":{"said":"{{n1.output}}"}}
+  ]}
+}'
+
+curl -sX POST localhost:8080/v1/runs -d '{"agent":"two-step","input":{"topic":"durable execution"}}'
+curl -s localhost:8080/v1/runs/<run-id>
+```
+
+Or drive it from the CLI:
+
+```bash
+go run ./cmd/anchorctl submit -agent two-step -input '{"topic":"durable execution"}'
 go run ./cmd/anchorctl show -run <run-id>
 ```
 
@@ -155,8 +177,8 @@ choice costs.
 | # | Deliverable | Status |
 |---|---|---|
 | M1 | Repo, Docker Compose, CI. Schema and migrations. Event append with `(run_id, seq)` uniqueness. Fold. `rebuild` command. Unit tests on the fold. | **done** |
-| M2 | `anchor-server` REST API. `SKIP LOCKED` queue. Worker pool claiming and executing a two-step mock agent. Idempotency keys enforced. Retries with backoff. | next |
-| M3 | Leases, heartbeats, expiry takeover. Graceful shutdown. Chaos script. Crash recovery proven. | |
+| M2 | `anchor-server` REST API. `SKIP LOCKED` queue. Worker pool claiming and executing a two-node graph. Idempotency keys enforced. Retries with backoff. | **done** |
+| M3 | Lease expiry takeover and the reaper. Chaos script. Crash recovery proven. | next |
 | M4 | Docker sandbox executor with limits; tool schema validation; real LLM provider adapter. | |
 | M5 | Budgets, Redis token-bucket rate limiting, circuit breaker, backpressure. Prometheus metrics. | |
 | M6 | Deterministic replay end-to-end: `ReplaySource`, replay run type, divergence detection, fidelity report. | |

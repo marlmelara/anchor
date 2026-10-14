@@ -75,7 +75,18 @@ not.
 
 ### Still outstanding
 
-- **M1 checkpoint quiz** — not yet taken. 80% without notes gates M2.
+- **M1 checkpoint quiz — DEFERRED by the owner on 2026-10-14**, one question in
+  (scored 0/1 on Q1). The spec gates M2 on 80%; that gate is knowingly skipped
+  to meet a deadline, with quizzes to be taken in a block after the build.
+
+  What this costs: the quiz exists to catch the gap between intuition and
+  articulation, and Q1 found exactly that one — the benefits of event sourcing
+  and the read cost of it were both unstateable, though the underlying
+  understanding was there. That gap does not close by itself while building.
+
+  What keeps the deferral recoverable: a `docs/learning/` entry is still written
+  at every milestone. Those are the study material; without them there is
+  nothing to revise from later.
 - **Tests Marlon owns.** The spec assigns three suites to him with Claude
   reviewing: the fold, idempotency-key behaviour, and the replay divergence
   check. The first two currently exist in Claude's hand

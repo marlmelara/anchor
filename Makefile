@@ -8,7 +8,7 @@ REDIS ?= redis://localhost:6380/0
 export ANCHOR_DATABASE_URL := $(DSN)
 export ANCHOR_REDIS_URL := $(REDIS)
 
-.PHONY: help up down reset-db migrate test test-unit test-race lint tidy-check ci fmt vet build clean rebuild verify psql redis-cli cover
+.PHONY: help up down reset-db migrate chaos test test-unit test-race lint tidy-check ci fmt vet build clean rebuild verify psql redis-cli cover
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'

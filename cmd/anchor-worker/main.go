@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -30,21 +31,42 @@ func main() {
 	heartbeat := flag.Duration("heartbeat", 10*time.Second, "lease renewal interval")
 	providerName := flag.String("provider", "mock", "model provider: mock (real providers arrive in M4)")
 	mockLatency := flag.Duration("mock-latency", 50*time.Millisecond, "fixed latency for the mock provider")
+	chaosTools := flag.Bool("chaos-tools", false, "register the chaos counting tool (test harness only)")
+	reapEvery := flag.Duration("reap", 5*time.Second, "how often to requeue runs whose lease expired")
+	schema := flag.String("schema", "", "postgres search_path (default: public)")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	if err := run(*dsn, *poolSize, *workerID, *leaseFor, *heartbeat, *providerName, *mockLatency, log); err != nil {
+	cfg := options{
+		dsn: *dsn, poolSize: *poolSize, workerID: *workerID,
+		leaseFor: *leaseFor, heartbeat: *heartbeat, reapEvery: *reapEvery,
+		providerName: *providerName, mockLatency: *mockLatency,
+		chaosTools: *chaosTools, schema: *schema,
+	}
+	if err := run(cfg, log); err != nil {
 		log.Error("fatal", "err", err)
 		os.Exit(1)
 	}
 }
 
-func run(
-	dsn string, poolSize int, workerID string,
-	leaseFor, heartbeat time.Duration,
-	providerName string, mockLatency time.Duration,
-	log *slog.Logger,
-) error {
+// options groups the flags so the signature stays readable as they accumulate.
+type options struct {
+	dsn          string
+	poolSize     int
+	workerID     string
+	leaseFor     time.Duration
+	heartbeat    time.Duration
+	reapEvery    time.Duration
+	providerName string
+	mockLatency  time.Duration
+	chaosTools   bool
+	schema       string
+}
+
+func run(o options, log *slog.Logger) error {
+	dsn, poolSize, workerID := o.dsn, o.poolSize, o.workerID
+	leaseFor, heartbeat := o.leaseFor, o.heartbeat
+	providerName, mockLatency, chaosTools := o.providerName, o.mockLatency, o.chaosTools
 	if dsn == "" {
 		dsn = os.Getenv("ANCHOR_DATABASE_URL")
 	}
@@ -69,7 +91,9 @@ func run(
 	defer cancel()
 	// The pool must exceed the worker pool size: each goroutine holds a
 	// connection for the whole of its claim transaction.
-	s, err := store.Open(connectCtx, store.Config{DSN: dsn, MaxConns: int32(poolSize) + 4})
+	s, err := store.Open(connectCtx, store.Config{
+		DSN: dsn, MaxConns: int32(poolSize) + 4, Schema: o.schema,
+	})
 	if err != nil {
 		return fmt.Errorf("open store: %w", err)
 	}
@@ -87,11 +111,19 @@ func run(
 	_ = registry.Register(echoDef)
 	runner.Handle("echo", echoFn)
 
+	if chaosTools {
+		if err := registerChaosTool(context.Background(), s, registry, runner); err != nil {
+			return fmt.Errorf("register chaos tool: %w", err)
+		}
+		log.Info("chaos tools registered")
+	}
+
 	w := worker.New(s, mock, registry, runner, worker.Config{
 		WorkerID:       workerID,
 		PoolSize:       poolSize,
 		LeaseFor:       leaseFor,
 		HeartbeatEvery: heartbeat,
+		ReapEvery:      o.reapEvery,
 		Logf:           func(format string, args ...any) { log.Info(fmt.Sprintf(format, args...)) },
 	})
 
@@ -115,4 +147,59 @@ func run(
 		stopRuns()
 		return nil
 	}
+}
+
+// registerChaosTool wires up the tool the chaos suite measures.
+//
+// The effect is a row in a real table in a real database, not an in-memory
+// counter. That distinction is the entire point: an in-process counter dies
+// with the process it lives in, so it could never prove anything about a
+// worker that was SIGKILLed. A committed row survives, and counting rows
+// afterwards is a direct measurement of how many times the effect actually
+// happened.
+func registerChaosTool(ctx context.Context, s *store.Store, registry *tool.Registry, runner *tool.MockRunner) error {
+	if _, err := s.Pool().Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS chaos_effects (
+			id         bigserial   PRIMARY KEY,
+			marker     text        NOT NULL,
+			created_at timestamptz NOT NULL DEFAULT now()
+		)`); err != nil {
+		return fmt.Errorf("create chaos_effects: %w", err)
+	}
+
+	def := tool.Definition{
+		Name:        "chaos_count",
+		Description: "records one effect row; the chaos suite counts them",
+		// Idempotent: repeating this is NOT harmless -- that is what makes it a
+		// useful probe. If Anchor ever lets a step run twice, there will be two
+		// rows and the test will say so.
+		Idempotent: true,
+	}
+	if err := registry.Register(def); err != nil {
+		return err
+	}
+
+	runner.Handle("chaos_count", func(ctx context.Context, input json.RawMessage) (tool.Result, error) {
+		var in struct {
+			Marker string `json:"marker"`
+		}
+		if err := json.Unmarshal(input, &in); err != nil {
+			return tool.Result{}, fmt.Errorf("chaos_count input: %w", err)
+		}
+		if in.Marker == "" {
+			return tool.Result{}, errors.New("chaos_count requires a marker")
+		}
+		var id int64
+		if err := s.Pool().QueryRow(ctx,
+			`INSERT INTO chaos_effects (marker) VALUES ($1) RETURNING id`, in.Marker,
+		).Scan(&id); err != nil {
+			return tool.Result{}, fmt.Errorf("record effect: %w", err)
+		}
+		out, err := json.Marshal(map[string]any{"effect_id": id, "marker": in.Marker})
+		if err != nil {
+			return tool.Result{}, err
+		}
+		return tool.Result{Output: out, ExitCode: 0}, nil
+	})
+	return nil
 }

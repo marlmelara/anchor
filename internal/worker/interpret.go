@@ -89,6 +89,16 @@ type execution struct {
 	// outputs maps node id (and "input") to the value templates can reference.
 	outputs map[string]json.RawMessage
 
+	// cursor is the walk's position: the step index the next side-effecting
+	// step will take. It counts steps the walk has reached, which on a resumed
+	// run includes the ones replayed from the journal rather than executed.
+	//
+	// It must NOT be derived from len(st.Steps). That equals the walk position
+	// only on a fresh run; on a resumed one the folded state already holds the
+	// completed steps, so reading its length would start the walk past the end
+	// and re-execute the whole graph at new indexes.
+	cursor int
+
 	// parkFor is set when a step needs to wait before its next attempt; the run
 	// is requeued rather than the worker sleeping on it.
 	parkFor time.Duration
@@ -215,39 +225,32 @@ func modelOutput(resp provider.Response) json.RawMessage {
 	return encoded
 }
 
-// modelStep performs one model call as a durable step: reserve, journal,
-// execute, journal the result, with retries.
+// modelStep performs one model call as a durable step: position the walk,
+// journal, execute, journal the result, with retries.
 func (e *execution) modelStep(ctx context.Context, nodeID, model string, req provider.Request) (provider.Response, error) {
-	stepIndex := len(e.st.Steps)
-
-	// Already done on an earlier attempt or before a crash: reuse the record
-	// rather than paying for the call again.
-	if done, resp, ok := e.recordedModelStep(stepIndex); ok {
-		if done {
-			return resp, nil
-		}
-	}
-
-	req.StepIndex = stepIndex
-
 	// Budgets are enforced in code before the call, never by asking the model
-	// to behave. The projection is deliberately pessimistic: the per-call
-	// ceiling, because the actual completion length is unknown until after the
+	// to behave. The projection is deliberately pessimistic -- the per-call
+	// ceiling -- because the real completion length is unknown until after the
 	// money is spent.
-	projected := e.st.TokensUsed + int64(e.w.cfg.MaxTokensPerCall)
-	if e.st.BudgetTokens > 0 && projected > e.st.BudgetTokens {
-		if err := e.append(ctx,
-			store.PendingEvent{Type: journal.TypeBudgetExceeded, Payload: journal.BudgetExceededPayload{
-				Versioned: v(), Resource: "tokens",
-				Limit: e.st.BudgetTokens, Used: e.st.TokensUsed, Projected: projected,
-			}},
-			store.PendingEvent{Type: journal.TypeRunFailed, Payload: journal.RunFailedPayload{
-				Versioned: v(), Error: "token budget exceeded",
-			}},
-		); err != nil {
-			return provider.Response{}, err
+	//
+	// Checked before the cursor advances so a refused run does not consume an
+	// index it never used.
+	if e.st.BudgetTokens > 0 {
+		projected := e.st.TokensUsed + int64(e.w.cfg.MaxTokensPerCall)
+		if projected > e.st.BudgetTokens && !e.stepAlreadyDone(e.cursor) {
+			if err := e.append(ctx,
+				store.PendingEvent{Type: journal.TypeBudgetExceeded, Payload: journal.BudgetExceededPayload{
+					Versioned: v(), Resource: "tokens",
+					Limit: e.st.BudgetTokens, Used: e.st.TokensUsed, Projected: projected,
+				}},
+				store.PendingEvent{Type: journal.TypeRunFailed, Payload: journal.RunFailedPayload{
+					Versioned: v(), Error: "token budget exceeded",
+				}},
+			); err != nil {
+				return provider.Response{}, err
+			}
+			return provider.Response{}, errTerminalJournaled
 		}
-		return provider.Response{}, errTerminalJournaled
 	}
 
 	reqJSON, err := json.Marshal(req)
@@ -255,9 +258,24 @@ func (e *execution) modelStep(ctx context.Context, nodeID, model string, req pro
 		return provider.Response{}, fmt.Errorf("marshal model request: %w", err)
 	}
 
-	if err := e.scheduleStep(ctx, stepIndex, journal.StepKindModel, model, nodeID, reqJSON); err != nil {
+	// A model call is safe to repeat -- it costs money, not correctness -- so
+	// it is treated as idempotent in the ambiguous window.
+	decision, err := e.beginStep(ctx, journal.StepKindModel, model, nodeID, reqJSON, true)
+	if err != nil {
 		return provider.Response{}, err
 	}
+	if decision.recorded != nil {
+		// Already completed, before a crash or on an earlier pass. Reuse it:
+		// token accounting is already in the folded state, so re-adding it here
+		// would double-count.
+		return provider.Response{
+			Raw:   decision.recorded.ModelResponse,
+			Text:  textFromRecorded(decision.recorded.ModelResponse),
+			Cents: decision.recorded.Cents,
+		}, nil
+	}
+	stepIndex := decision.index
+	req.StepIndex = stepIndex
 
 	for {
 		step, _ := e.st.Step(stepIndex)
@@ -302,22 +320,11 @@ func (e *execution) modelStep(ctx context.Context, nodeID, model string, req pro
 	}
 }
 
-// recordedModelStep reports whether this step already completed, and with what.
-func (e *execution) recordedModelStep(stepIndex int) (done bool, resp provider.Response, ok bool) {
-	step, exists := e.st.Step(stepIndex)
-	if !exists {
-		return false, provider.Response{}, false
-	}
-	if step.Status != journal.StepStatusCompleted {
-		return false, provider.Response{}, true
-	}
-	// Reconstruct just enough for the walk to continue. Token accounting is
-	// already in the folded state; re-adding it here would double-count.
-	return true, provider.Response{
-		Raw:   step.ModelResponse,
-		Text:  textFromRecorded(step.ModelResponse),
-		Cents: step.Cents,
-	}, true
+// stepAlreadyDone reports whether the walk has already completed this index,
+// so a resumed run does not re-evaluate a gate the original run passed.
+func (e *execution) stepAlreadyDone(index int) bool {
+	st, ok := e.st.Step(index)
+	return ok && st.Status == journal.StepStatusCompleted
 }
 
 func textFromRecorded(raw json.RawMessage) string {
@@ -362,20 +369,19 @@ func wrapToolOutput(out json.RawMessage) json.RawMessage {
 
 // toolStep runs one tool as a durable step.
 func (e *execution) toolStep(ctx context.Context, nodeID, toolName string, input json.RawMessage) (json.RawMessage, error) {
-	stepIndex := len(e.st.Steps)
-
-	if step, exists := e.st.Step(stepIndex); exists && step.Status == journal.StepStatusCompleted {
-		return step.ToolOutput, nil
-	}
-
 	def, ok := e.w.tools.Get(toolName)
 	if !ok {
 		return nil, fmt.Errorf("node %q: unknown tool %q", nodeID, toolName)
 	}
 
-	if err := e.scheduleStep(ctx, stepIndex, journal.StepKindTool, toolName, nodeID, input); err != nil {
+	decision, err := e.beginStep(ctx, journal.StepKindTool, toolName, nodeID, input, def.Idempotent)
+	if err != nil {
 		return nil, err
 	}
+	if decision.recorded != nil {
+		return decision.recorded.ToolOutput, nil
+	}
+	stepIndex := decision.index
 
 	for {
 		step, _ := e.st.Step(stepIndex)
@@ -409,8 +415,6 @@ func (e *execution) toolStep(ctx context.Context, nodeID, toolName string, input
 			runErr = fmt.Errorf("tool %q exited with code %d: %s", toolName, res.ExitCode, res.Stderr)
 		}
 
-		// A non-idempotent tool that failed may still have had its effect.
-		// Anchor refuses to guess: the run halts for a human.
 		retry, err := e.handleStepFailure(ctx, stepIndex, attempt, runErr, def.Idempotent)
 		if err != nil {
 			return nil, err
@@ -487,45 +491,92 @@ func (e *execution) runAgentLoop(ctx context.Context, node agent.Node) error {
 // shared step mechanics
 // ---------------------------------------------------------------------------
 
-// scheduleStep reserves the idempotency key and journals StepScheduled.
+// stepDecision is where the walk landed and what it found there.
+type stepDecision struct {
+	index int
+	// recorded is non-nil when this step already completed, on an earlier pass
+	// or before a crash. The caller reuses it instead of executing.
+	recorded *journal.StepState
+}
+
+// beginStep advances the walk by one step and makes sure that step is
+// scheduled, reserved, and safe to execute.
 //
-// Journal-before-effect: StepScheduled is written before anything happens, so a
-// crash leaves evidence that the step was about to run. The reservation and the
-// event are not in one transaction by accident -- the reservation has to be
-// visible to every worker immediately, including one that takes over after this
-// one dies.
-func (e *execution) scheduleStep(
+// Three cases, and the third is the interesting one:
+//
+//  1. The folded state has this step completed -> reuse it. This is how a
+//     resumed run replays its finished prefix for free.
+//  2. The folded state has it scheduled or failed -> an earlier attempt got
+//     this far. Go straight to execution; re-journaling StepScheduled would be
+//     rejected by the fold, which allows one per index.
+//  3. The folded state has nothing here -> reserve the idempotency key and
+//     journal StepScheduled. If the reservation reports the key ALREADY
+//     EXISTS while the journal shows nothing, a previous worker reserved it
+//     and died before journaling: the ambiguous window. The effect may or may
+//     not have been applied, and only the tool's own declaration can say what
+//     to do about that.
+func (e *execution) beginStep(
 	ctx context.Context,
-	stepIndex int,
 	kind journal.StepKind,
 	name, nodeID string,
 	input json.RawMessage,
-) error {
-	tx, err := e.w.store.Pool().Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin reservation: %w", err)
-	}
-	reservation, err := e.w.store.ReserveStep(ctx, tx, e.st.RunID, stepIndex, kind, name, input)
-	if err != nil {
-		_ = tx.Rollback(ctx)
-		return err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit reservation: %w", err)
+	idempotent bool,
+) (stepDecision, error) {
+	index := e.cursor
+	e.cursor++
+
+	if existing, ok := e.st.Step(index); ok {
+		if existing.Status == journal.StepStatusCompleted {
+			return stepDecision{index: index, recorded: existing}, nil
+		}
+		return stepDecision{index: index}, nil
 	}
 
-	// Recorded so a replay reseeds identically. The generator here is the
+	tx, err := e.w.store.Pool().Begin(ctx)
+	if err != nil {
+		return stepDecision{}, fmt.Errorf("begin reservation: %w", err)
+	}
+	reservation, err := e.w.store.ReserveStep(ctx, tx, e.st.RunID, index, kind, name, input)
+	if err != nil {
+		_ = tx.Rollback(ctx)
+		return stepDecision{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return stepDecision{}, fmt.Errorf("commit reservation: %w", err)
+	}
+
+	if reservation.AlreadyRan && !idempotent {
+		idx := index
+		if err := e.append(ctx, store.PendingEvent{
+			Type: journal.TypeRunNeedsReview,
+			Payload: journal.RunNeedsReviewPayload{
+				Versioned: v(),
+				Reason: fmt.Sprintf(
+					"step %d (%s) was reserved by a worker that died before recording a result; "+
+						"the tool is not idempotent, so whether its effect was applied cannot be determined",
+					index, name),
+				StepIndex: &idx,
+			},
+		}); err != nil {
+			return stepDecision{}, err
+		}
+		return stepDecision{}, errTerminalJournaled
+	}
+
+	// Recorded so a replay reseeds identically. The generator is the
 	// package-level one from math/rand/v2, which is safe for concurrent use;
-	// what matters for determinism is that the value is journaled, not where it
-	// came from.
+	// what matters for determinism is that the value is journaled.
 	seed := rand.Int64()
-	return e.append(ctx, store.PendingEvent{
+	if err := e.append(ctx, store.PendingEvent{
 		Type: journal.TypeStepScheduled,
 		Payload: journal.StepScheduledPayload{
-			Versioned: v(), StepIndex: stepIndex, Kind: kind, Name: name,
+			Versioned: v(), StepIndex: index, Kind: kind, Name: name,
 			NodeID: nodeID, IdempotencyKey: reservation.Key, RandSeed: seed,
 		},
-	})
+	}); err != nil {
+		return stepDecision{}, err
+	}
+	return stepDecision{index: index}, nil
 }
 
 // handleStepFailure journals the failure and decides what happens next.

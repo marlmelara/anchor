@@ -32,9 +32,16 @@ partitioned log.
 
 ## Status
 
-Milestones 1 and 2 of 8 are complete: runs are journaled, claimed from a
+Milestones 1 to 3 of 8 are complete. Runs are journaled, claimed from a
 `SKIP LOCKED` queue, and executed by a worker pool against a mock provider,
-with idempotency keys and retries. See [Milestones](#milestones).
+with idempotency keys and retries. Workers that are `SIGKILL`ed lose no runs
+and duplicate no effects — proven by a chaos suite that kills real processes:
+
+```bash
+make chaos
+```
+
+See [Milestones](#milestones).
 
 ---
 
@@ -178,8 +185,8 @@ choice costs.
 |---|---|---|
 | M1 | Repo, Docker Compose, CI. Schema and migrations. Event append with `(run_id, seq)` uniqueness. Fold. `rebuild` command. Unit tests on the fold. | **done** |
 | M2 | `anchor-server` REST API. `SKIP LOCKED` queue. Worker pool claiming and executing a two-node graph. Idempotency keys enforced. Retries with backoff. | **done** |
-| M3 | Lease expiry takeover and the reaper. Chaos script. Crash recovery proven. | next |
-| M4 | Docker sandbox executor with limits; tool schema validation; real LLM provider adapter. | |
+| M3 | Lease expiry takeover and the reaper. Chaos script. Crash recovery proven. | **done** |
+| M4 | Docker sandbox executor with limits; tool schema validation; real LLM provider adapter. | next |
 | M5 | Budgets, Redis token-bucket rate limiting, circuit breaker, backpressure. Prometheus metrics. | |
 | M6 | Deterministic replay end-to-end: `ReplaySource`, replay run type, divergence detection, fidelity report. | |
 | M7 | Trace viewer. TypeScript SDK. | |
@@ -197,9 +204,9 @@ alongside the results.
 |---|---|
 | Throughput (steps/sec at W workers) | pending M8 |
 | p99 scheduling latency (claim → start) | pending M8 |
-| Recovery time after worker kill | pending M8 |
+| Recovery time after worker kill | bounded by lease duration; measured in M8 |
 | Replay fidelity over ≥200 runs | pending M6 |
-| Duplicate effects under fault injection | pending M3 |
+| Duplicate effects under fault injection | **zero**, over 60 runs and 8+ worker kills (`make chaos`) |
 
 ---
 

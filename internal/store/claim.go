@@ -142,3 +142,73 @@ func (s *Store) QueueDepth(ctx context.Context) (int64, error) {
 	}
 	return depth, nil
 }
+
+// ReapExpiredLeases returns runs whose owner stopped heartbeating to the queue.
+//
+// This is how a crashed worker's runs come back. The dead worker cannot release
+// anything -- SIGKILL gives it no chance to -- so recovery cannot depend on the
+// loser doing anything. Instead ownership simply expires: the lease has a
+// deadline, the live worker renews it, and a dead one stops.
+//
+// Every worker runs this, so recovery survives losing whichever worker happened
+// to be the reaper. That makes it concurrent, so it has to be idempotent:
+// ON CONFLICT DO NOTHING means two reapers requeueing the same run produce one
+// queue row, not two.
+func (s *Store) ReapExpiredLeases(ctx context.Context) (int64, error) {
+	now := pgTimestamp(s.Now())
+
+	// Terminal runs are filtered out via the runs projection. Reading a cache
+	// to make a scheduling decision is safe here precisely because it is only a
+	// scheduling decision: if the projection were stale and a finished run were
+	// requeued, the worker that claimed it would fold the log, see a terminal
+	// state, and release it. The cost of being wrong is one wasted claim.
+	tag, err := s.pool.Exec(ctx, `
+		WITH expired AS (
+			DELETE FROM leases WHERE expires_at < $1 RETURNING run_id
+		)
+		INSERT INTO queue (run_id, available_at, priority, enqueued_at)
+		SELECT e.run_id, $1, 0, $1
+		FROM expired e
+		JOIN runs r ON r.id = e.run_id
+		WHERE r.status NOT IN ('completed', 'failed', 'cancelled', 'needs_review')
+		ON CONFLICT (run_id) DO NOTHING`, now)
+	if err != nil {
+		return 0, fmt.Errorf("reap expired leases: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+// LeaseInfo is a leases row, for tests and operator tooling.
+type LeaseInfo struct {
+	RunID     uuid.UUID
+	WorkerID  string
+	ExpiresAt time.Time
+}
+
+// Lease reads the current owner of a run, if any.
+func (s *Store) Lease(ctx context.Context, runID uuid.UUID) (*LeaseInfo, error) {
+	var l LeaseInfo
+	err := s.pool.QueryRow(ctx,
+		`SELECT run_id, worker_id, expires_at FROM leases WHERE run_id = $1`, runID,
+	).Scan(&l.RunID, &l.WorkerID, &l.ExpiresAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("lease for run %s: %w", runID, ErrNotFound)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read lease: %w", err)
+	}
+	l.ExpiresAt = l.ExpiresAt.UTC()
+	return &l, nil
+}
+
+// ExpireLeaseNow forces a lease to look expired. Used by tests and the chaos
+// harness to simulate a worker that died without releasing.
+func (s *Store) ExpireLeaseNow(ctx context.Context, runID uuid.UUID) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE leases SET expires_at = $1 WHERE run_id = $2`,
+		pgTimestamp(s.Now().Add(-time.Second)), runID)
+	if err != nil {
+		return fmt.Errorf("expire lease: %w", err)
+	}
+	return nil
+}

@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/marlmelara/anchor/internal/idem"
 	"github.com/marlmelara/anchor/internal/journal"
 	"github.com/marlmelara/anchor/internal/provider"
 	"github.com/marlmelara/anchor/internal/store"
@@ -438,5 +439,234 @@ func TestNonIdempotentToolFailureHaltsForReview(t *testing.T) {
 	}
 	if st.Error == "" {
 		t.Error("no reason recorded; a run halted for a human must say what to check")
+	}
+}
+
+// Resumption must reuse the completed prefix, not re-walk it at new indexes.
+//
+// This is a regression test for a real bug: the step index was taken from
+// len(st.Steps), which equals the walk position only on a FRESH run. On a
+// resumed run the folded state already holds the completed steps, so the walk
+// started past the end and executed the whole graph again at higher indexes.
+// It passed every single-worker test and only showed up under the chaos loop,
+// as runs finishing with 3 or 4 steps instead of 2.
+func TestResumeReusesCompletedStepsInsteadOfRepeatingThem(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	h := newHarness(t, s)
+	version := registerAgent(t, s, "two-step", twoNodeGraph)
+	runID := submit(t, s, "two-step", version, `{"topic":"resume"}`)
+
+	// Hand-build the journal of a run whose first step finished just before its
+	// worker died: started, step 0 scheduled, step 0 completed, nothing else.
+	st := loadState(t, s, runID)
+	req := json.RawMessage(`{"model":"mock","messages":[]}`)
+	key, err := idem.Key(runID, 0, req)
+	if err != nil {
+		t.Fatalf("idem.Key: %v", err)
+	}
+	v := journal.Versioned{V: journal.CurrentPayloadVersion}
+
+	// The reservation row the dead worker left behind.
+	tx, err := s.Pool().Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if _, err := s.ReserveStep(ctx, tx, runID, 0, journal.StepKindModel, "mock", req); err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	if err := s.Append(ctx, st,
+		store.PendingEvent{Type: journal.TypeRunStarted,
+			Payload: journal.RunStartedPayload{Versioned: v, WorkerID: "dead-worker"}},
+		store.PendingEvent{Type: journal.TypeStepScheduled,
+			Payload: journal.StepScheduledPayload{
+				Versioned: v, StepIndex: 0, Kind: journal.StepKindModel, Name: "mock",
+				NodeID: "n1", IdempotencyKey: key, RandSeed: 1,
+			}},
+		store.PendingEvent{Type: journal.TypeModelCallStarted,
+			Payload: journal.ModelCallStartedPayload{
+				Versioned: v, StepIndex: 0, Model: "mock", Request: req}},
+		store.PendingEvent{Type: journal.TypeModelCallCompleted,
+			Payload: journal.ModelCallCompletedPayload{
+				Versioned: v, StepIndex: 0, Model: "mock",
+				Response:     json.RawMessage(`{"text":"already answered"}`),
+				PromptTokens: 10, CompletionTokens: 5, Cents: 1}},
+	); err != nil {
+		t.Fatalf("seed journal: %v", err)
+	}
+
+	runUntilDrained(t, h, []*worker.Worker{h.newWorker(t, "w-2", 1)}, 20*time.Second)
+
+	final := loadState(t, s, runID)
+	if final.Status != journal.RunStatusCompleted {
+		t.Fatalf("status = %q (error: %s), want completed", final.Status, final.Error)
+	}
+	if len(final.Steps) != 2 {
+		t.Fatalf("len(Steps) = %d, want 2; the resumed walk re-executed the completed prefix", len(final.Steps))
+	}
+	// The already-finished model call must not have been made again.
+	if calls := h.provider.Calls(); calls != 0 {
+		t.Errorf("provider called %d times on resume; step 0 was already completed and must be reused", calls)
+	}
+	if final.Steps[0].IdempotencyKey != key {
+		t.Errorf("step 0 key changed on resume: %s", final.Steps[0].IdempotencyKey)
+	}
+	// Token accounting must not double-count the reused step.
+	if final.TokensUsed != 15 {
+		t.Errorf("TokensUsed = %d, want 15; a reused step must not be billed twice", final.TokensUsed)
+	}
+}
+
+// A lease whose owner stopped heartbeating must come back to the queue, or a
+// crashed worker's runs are stranded forever.
+func TestReaperRequeuesExpiredLeases(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	version := registerAgent(t, s, "two-step", twoNodeGraph)
+	runID := submit(t, s, "two-step", version, `{"topic":"orphan"}`)
+
+	claimed, err := s.ClaimNext(ctx, "doomed-worker", 30*time.Second)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if claimed != runID {
+		t.Fatalf("claimed %s, want %s", claimed, runID)
+	}
+
+	// Nothing is queued while the run is owned and the lease is live.
+	n, err := s.ReapExpiredLeases(ctx)
+	if err != nil {
+		t.Fatalf("reap: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("reaped %d runs with a live lease, want 0", n)
+	}
+
+	// The worker dies: no release, no heartbeat, the lease simply ages out.
+	if err := s.ExpireLeaseNow(ctx, runID); err != nil {
+		t.Fatalf("expire lease: %v", err)
+	}
+
+	n, err = s.ReapExpiredLeases(ctx)
+	if err != nil {
+		t.Fatalf("reap: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("reaped %d runs, want 1", n)
+	}
+	if _, err := s.Lease(ctx, runID); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("the expired lease was not removed: %v", err)
+	}
+
+	// Another worker can now take it.
+	retaken, err := s.ClaimNext(ctx, "rescuer", 30*time.Second)
+	if err != nil {
+		t.Fatalf("reclaim: %v", err)
+	}
+	if retaken != runID {
+		t.Errorf("reclaimed %s, want %s", retaken, runID)
+	}
+	lease, err := s.Lease(ctx, runID)
+	if err != nil {
+		t.Fatalf("read lease: %v", err)
+	}
+	if lease.WorkerID != "rescuer" {
+		t.Errorf("owner = %q, want rescuer", lease.WorkerID)
+	}
+}
+
+// A finished run whose worker died before releasing must not be requeued --
+// claiming it again would be pure waste.
+func TestReaperIgnoresTerminalRuns(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	h := newHarness(t, s)
+	version := registerAgent(t, s, "two-step", twoNodeGraph)
+	runID := submit(t, s, "two-step", version, `{"topic":"done"}`)
+
+	runUntilDrained(t, h, []*worker.Worker{h.newWorker(t, "w-1", 1)}, 15*time.Second)
+	if st := loadState(t, s, runID); st.Status != journal.RunStatusCompleted {
+		t.Fatalf("setup: status = %q", st.Status)
+	}
+
+	// Put an expired lease back on the finished run, as a worker that died
+	// after RunCompleted but before releasing would leave.
+	if _, err := s.Pool().Exec(ctx, `
+		INSERT INTO leases (run_id, worker_id, acquired_at, heartbeat_at, expires_at)
+		VALUES ($1, 'zombie', now(), now(), now() - interval '1 minute')`, runID); err != nil {
+		t.Fatalf("insert stale lease: %v", err)
+	}
+
+	n, err := s.ReapExpiredLeases(ctx)
+	if err != nil {
+		t.Fatalf("reap: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("reaped %d terminal runs, want 0", n)
+	}
+	if _, err := s.Lease(ctx, runID); !errors.Is(err, store.ErrNotFound) {
+		t.Error("the stale lease should still be cleaned up even when the run is not requeued")
+	}
+}
+
+// A zombie worker -- one that froze, lost its lease, then woke believing it
+// still owned the run -- must not be able to corrupt anything.
+func TestZombieWorkerCannotAdvanceARunItLost(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	version := registerAgent(t, s, "two-step", twoNodeGraph)
+	runID := submit(t, s, "two-step", version, `{"topic":"zombie"}`)
+
+	if _, err := s.ClaimNext(ctx, "zombie", 30*time.Second); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	// The state the zombie is holding in memory.
+	zombieState := loadState(t, s, runID)
+
+	// It freezes. The lease expires, the reaper requeues, a new worker takes it.
+	if err := s.ExpireLeaseNow(ctx, runID); err != nil {
+		t.Fatalf("expire: %v", err)
+	}
+	if _, err := s.ReapExpiredLeases(ctx); err != nil {
+		t.Fatalf("reap: %v", err)
+	}
+	if _, err := s.ClaimNext(ctx, "rescuer", 30*time.Second); err != nil {
+		t.Fatalf("reclaim: %v", err)
+	}
+	rescuerState := loadState(t, s, runID)
+	v := journal.Versioned{V: journal.CurrentPayloadVersion}
+	if err := s.Append(ctx, rescuerState, store.PendingEvent{
+		Type:    journal.TypeRunStarted,
+		Payload: journal.RunStartedPayload{Versioned: v, WorkerID: "rescuer", Resumed: true},
+	}); err != nil {
+		t.Fatalf("rescuer append: %v", err)
+	}
+
+	// Now the zombie wakes up and tries to continue from its stale state.
+	err := s.Append(ctx, zombieState, store.PendingEvent{
+		Type:    journal.TypeRunStarted,
+		Payload: journal.RunStartedPayload{Versioned: v, WorkerID: "zombie"},
+	})
+	if !errors.Is(err, store.ErrSeqConflict) {
+		t.Fatalf("zombie append: err = %v, want ErrSeqConflict", err)
+	}
+
+	// Its heartbeat also tells it the truth.
+	stillOwner, err := s.Heartbeat(ctx, runID, "zombie", 30*time.Second)
+	if err != nil {
+		t.Fatalf("heartbeat: %v", err)
+	}
+	if stillOwner {
+		t.Error("the zombie's heartbeat reported it still owns the run")
+	}
+
+	// And the log is unharmed: one rescuer start, no zombie start after it.
+	final := loadState(t, s, runID)
+	if final.WorkerID != "rescuer" {
+		t.Errorf("owner in the journal = %q, want rescuer", final.WorkerID)
 	}
 }

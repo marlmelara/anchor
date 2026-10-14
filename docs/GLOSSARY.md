@@ -37,6 +37,19 @@ milestone where it first appears, so revision can be scoped to what is built.
 | Upsert | `INSERT ... ON CONFLICT DO UPDATE` or `DO NOTHING` | Projection writes | M1 |
 | VACUUM | Postgres reclaiming dead row versions left by updates and deletes | `queue`, which churns | M1 |
 
+| Backpressure | Making producers slow down when consumers cannot keep up | 429 above the high-water mark | M2 |
+| Cooperative cancellation | Cancelling by signalling and letting work stop at a safe point, not by killing it | `RunCancelled` | M2 |
+| Exponential backoff | Waiting longer after each failed retry: 1s, 2s, 4s | Retries | M2 |
+| `FOR UPDATE` | Locks the selected rows until the transaction ends | Claim query | M2 |
+| Heartbeat | The periodic renewal that keeps a lease alive | Every 10s | M2 |
+| High-water mark | The threshold above which new work is refused | Queue depth | M2 |
+| Jitter | Random variation in backoff so clients do not retry in lockstep | Retries | M2 |
+| Lease | Time-limited ownership that must be renewed, so it ends if the owner dies | `leases` table | M2 |
+| Retryable vs terminal error | Retryable may succeed if tried again; terminal will not | Retry logic | M2 |
+| `SKIP LOCKED` | Postgres option to step over rows other transactions have locked | Queue claims | M2 |
+| Stateless service | Keeps no data between requests, so copies are interchangeable | `anchor-server` | M2 |
+| Worker pool | A fixed number of workers each handling one unit of work at a time | `anchor-worker` | M2 |
+
 ## Go terms
 
 | Term | Plain-English meaning | Python equivalent | M |
@@ -52,3 +65,9 @@ milestone where it first appears, so revision can be scoped to what is built.
 | Struct | A record type with named fields | `@dataclass` | M1 |
 | Struct tag | Metadata on a field, e.g. `json:"run_id"`, controlling encoding | `Field(alias=...)` in Pydantic | M1 |
 | Zero value | The default a type gets when uninitialised: `0`, `""`, `nil` | Roughly `None`, but typed | M1 |
+| Goroutine | A very lightweight thread Go manages; `go f()` starts one | `asyncio.create_task`, but truly parallel | M2 |
+| Channel | A typed pipe between goroutines | `asyncio.Queue` | M2 |
+| `select` | Waits until one of several channels is ready | `asyncio.wait(..., FIRST_COMPLETED)` | M2 |
+| errgroup | A group of goroutines where `Wait` returns the first error | `asyncio.TaskGroup` | M2 |
+| Interface | A set of method signatures; any type with them satisfies it, no declaration | `typing.Protocol` | M2 |
+| Dependency injection | Passing a component its dependencies rather than having it build them | Same idea | M2 |

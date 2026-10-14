@@ -299,6 +299,47 @@ answer is to shard by tenant, not to tune the query.
 
 ---
 
+### Each pool goroutine claims its own run
+
+**Chose:** every goroutine in the worker pool runs its own claim -> execute ->
+journal -> release loop.
+
+**Alternative:** one claimer goroutine feeding executors through a buffered
+channel, which is the more obvious Go shape.
+
+**Why:** a claimed run sitting in a channel holds a lease while nobody is
+working on it. If the buffer is deep or the executors are busy, that lease can
+expire before execution starts, another worker claims the run, and now two
+workers hold it -- the exact failure leases exist to prevent. Claiming inside
+the executor means a lease is only ever held by a goroutine actually executing.
+
+It also gives backpressure for free: a goroutine claims only when it is free, so
+a worker can never take on more runs than it can execute.
+
+**Cost:** N goroutines each run a claim query, so an idle pool polls N times per
+interval instead of once. At large pool sizes that is wasted database work, and
+the fix would be a shared claimer with a *tiny* buffer and the heartbeat started
+at claim time rather than at execution time.
+
+---
+
+### Short retry backoffs wait in place; long ones park the run
+
+**Chose:** a backoff of up to one second is slept through inside the worker;
+anything longer requeues the run with a future `available_at`.
+
+**Alternative:** always sleep, or always requeue.
+
+**Why:** a sleeping goroutine holds a worker slot and a lease while doing
+nothing. For a 200ms backoff the bookkeeping of requeueing costs more than the
+wait. For a 30-second one it is the difference between a worker slot being
+usable and being idle.
+
+**Cost:** two code paths for one concept, and a threshold that is a guess until
+there are metrics to tune it against.
+
+---
+
 ### `jsonb` rather than `json` for payloads
 
 **Chose:** `jsonb` for `run_events.payload`, `runs.input`, and agent
@@ -311,6 +352,25 @@ dropped. Recorded model responses therefore round-trip semantically, not
 byte-for-byte. Replay comparison is unaffected because the original and the
 replay pass through the same normalisation, but any future check that hashes a
 raw payload must canonicalise first rather than trusting the stored bytes.
+
+---
+
+### One Postgres schema per test package
+
+**Chose:** each test package gets its own schema via `search_path`, created and
+migrated by `internal/testsupport`.
+
+**Alternative:** `go test -p 1` to run package test binaries one at a time.
+
+**Why:** Go runs package test binaries in parallel, and two packages truncating
+the same tables delete each other's rows mid-test. Serialising hides that rather
+than fixing it, makes the suite slower as packages are added, and leaves the
+tests genuinely coupled -- the next shared fixture would break them again.
+Separate schemas make them independent, and concurrency within a package is
+still exercised for real.
+
+**Cost:** a `Schema` option on `store.Config` that exists mostly for tests,
+though schema-per-tenant is a real deployment shape it would also serve.
 
 ---
 

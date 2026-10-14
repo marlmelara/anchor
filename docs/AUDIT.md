@@ -66,6 +66,24 @@ not.
 | fold uses `map[int]StepState` | dense `[]*StepState` | A slice enforces what the spec requires anyway: `step_index` is assigned sequentially as the worker walks the graph, so a hole is a bug. A map would accept `steps[7]` with no `steps[6]` and the error would surface much later. |
 | `ErrLostOwnership` | `ErrSeqConflict` | Same sentinel, named for the cause rather than the consequence. Worth renaming if it reads better in the worker loop at M2. |
 
+---
+
+## M2 — API, queue, worker, idempotency
+
+| # | Criterion | Status | Evidence |
+|---|---|---|---|
+| 1 | 100 submitted runs all complete, no run claimed twice | **pass** | `TestHundredRunsCompleteWithNoDuplicateExecution` — 3 workers x 4 goroutines; asserts all 100 completed, provider called exactly 100 times (a second execution would exceed that), 200 steps with 200 distinct keys, and projections still matching the fold |
+| 2 | Running a step twice with the same key executes it once | **pass** | `TestReserveStepMakesTheSecondAttemptANoop` — second reservation reports `AlreadyRan`, counter fires once, one `steps` row |
+
+Also covered: retries recovering from retryable provider errors, budget refusal
+before any spend, `agent_loop` running a tool then a final answer, and a
+non-idempotent tool failure halting the run in `needs_review` without retrying.
+
+Not yet built, by design: lease expiry takeover and the reaper (M3), the Docker
+sandbox and a real provider (M4), rate limits, circuit breakers and metrics
+(M5). `branch` and `map` nodes validate but return "not implemented yet" rather
+than silently skipping.
+
 ### Process deliverables added
 
 - `docs/learning/M1-journal-fold-rebuild.md` — the learning entry

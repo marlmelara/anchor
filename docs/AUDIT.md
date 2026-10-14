@@ -113,7 +113,7 @@ section of `docs/learning/M3-leases-crash-recovery.md`.
 | 1 | A tool that tries to use 1 GB of memory is killed | **pass** | `TestSandboxKillsAToolThatExceedsItsMemoryCap` — real container, 64 MB cap, `dd bs=1G`, killed with exit 137 |
 | 2 | A tool that tries network access without declaring it fails | **pass** | `TestSandboxDeniesNetworkToAToolThatDidNotDeclareEgress`, plus `TestSandboxDeniesEgressWhenTheDeploymentForbidsIt` for the second gate |
 | 3 | No containers remain after the chaos loop | **pass** | `TestSandboxLeavesNoContainersBehind` (5 calls including a timeout and an OOM) and `TestReapOrphansRemovesLeftoverContainers` |
-| 4 | One real end-to-end run against the Anthropic API succeeds | **NOT VERIFIED** | `scripts/live-check.sh` is written and `make live-check` runs it, but it needs a real credential and spends money, so it has not been executed. **Marlon must run this himself before claiming M4 complete.** |
+| 4 | One real end-to-end run against the Anthropic API succeeds | **pass (2026-10-14)** | Two runs of agent `live` completed against `claude-opus-5-5`, message `msg_011Cg2wM2PYRwvMgFkPSErTA`, 36 input / 143 output tokens. Verified from `runs` and the `ModelCallCompleted` payload, not from the script's own exit code. |
 
 Also covered: read-only root filesystem, non-root user, wall-clock timeout, and
 schema validation of both tool input (before a container starts) and output.
@@ -127,6 +127,30 @@ predates the current generation. Current ids are `claude-opus-5-5` (default),
 `claude-sonnet-5-5`, `claude-haiku-5-5`. The adapter does not default a model —
 the graph supplies it — so nothing is hardcoded, but the README and
 `live-check.sh` use current ids.
+
+### Two findings from the real run
+
+**1. `cents_used` is always zero, so the cost budget can never fire.** The
+Anthropic adapter never sets `Response.Cents` -- the API does not return a cost,
+it returns token counts, and the price has to be applied per model. The column,
+the `budget_cents` field, and the budget check in the interpreter all exist and
+all currently compare against zero. The token budget works; the cost budget is
+dead code against the real provider.
+
+Confirmed by query: 2 runs with `tokens_used > 0` and `cents_used = 0`.
+
+This is the first thing M5 has to fix -- that milestone is "budgets, rate
+limits, breakers", and a budget that cannot trigger is not a budget. It needs a
+per-model price table keyed by the model id, applied to prompt and completion
+tokens separately, since they are priced differently.
+
+**2. The thinking-block gap is real, not theoretical.** The live response's
+content blocks are `text, thinking`. The thinking block carries an empty `text`
+(display defaults to omitted) and a `signature`. Current models bind those
+blocks to the conversation that produced them, so the gap described below
+affects real multi-turn runs, not just hypothetical ones. Single `model_call`
+nodes -- what the live check exercises -- are unaffected, which is why it
+passed.
 
 **Known gap, deferred to M6/M7.** Anchor rebuilds the message array for each
 `agent_loop` turn from its own state rather than echoing the provider's content

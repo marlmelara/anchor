@@ -49,6 +49,12 @@ test-unit: ## Run only the tests that need no database
 test-race: up migrate ## Run every test under the race detector
 	ANCHOR_TEST_DATABASE_URL="$(DSN)" ANCHOR_TEST_DOCKER=1 go test -race ./...
 
+chaos: up migrate ## Run the chaos demo: kill workers and prove no runs are lost
+	./scripts/chaos.sh
+
+live-check: up migrate ## One real run against the Anthropic API (spends money; needs credentials)
+	./scripts/live-check.sh
+
 cover: up migrate ## Report test coverage
 	ANCHOR_TEST_DATABASE_URL="$(DSN)" go test ./... -coverprofile=coverage.out
 	go tool cover -func=coverage.out | tail -1

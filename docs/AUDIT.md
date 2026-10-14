@@ -136,6 +136,38 @@ Single `model_call` nodes are unaffected. Fixing it means journaling the
 assistant content blocks and replaying them unchanged — which M6's replay source
 needs anyway.
 
+---
+
+## Demo scripts: written, not verified
+
+`make chaos` and `make live-check` existed only in `.PHONY` with no rule, so
+both were silent no-ops (`make: Nothing to be done for ...`). A string
+replacement failed quietly and the verification checked the wrong thing: the
+`.PHONY` line and the script's `bash -n` syntax, never whether the rule existed.
+Fixed 2026-10-14; confirmed with `make -n`.
+
+Current status of the two shell entry points:
+
+| Script | Status |
+|---|---|
+| `scripts/chaos.sh` | **Never completed a run.** Syntax-checked only. An attempted run was interrupted and left a worker process respawning, which had to be killed by hand. |
+| `scripts/live-check.sh` | **Never run.** Needs a real Anthropic credential. |
+
+**What this does not affect.** M3's acceptance criteria were proven by the Go
+chaos suite -- `TestChaosLoopLosesNoRunsAndDuplicatesNoEffects` and
+`TestRollingRestartStrandsNoRuns` -- which spawn real worker processes, send
+real `SIGKILL`, and run in CI. Those remain verified. The shell scripts are
+convenience wrappers for the demo video, and a broken wrapper does not weaken
+the test evidence.
+
+**Lesson, recorded because it recurred.** Three times now a check has passed
+while testing the wrong thing: the chaos suite that passed after one kill, the
+memory-limit test whose command never allocated, and these two phantom make
+targets. In each case the verification step existed but confirmed something
+adjacent to the claim. The habit that catches it is asserting on the *effect*
+rather than on the setup -- a kill count rather than a green test, exit 137
+rather than a non-zero exit, `make -n <target>` rather than a grep of `.PHONY`.
+
 ### Process deliverables added
 
 - `docs/learning/M1-journal-fold-rebuild.md` — the learning entry

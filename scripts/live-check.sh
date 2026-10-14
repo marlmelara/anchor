@@ -43,9 +43,14 @@ JSON
 go run ./cmd/anchorctl agent-register -name live -file /tmp/anchor-live-graph.json
 
 echo "==> starting a worker against the real provider"
-go run ./cmd/anchor-worker -provider anthropic -pool 1 -id live-check &
+# Built rather than `go run`: go run spawns the binary as a CHILD process, so
+# $! is the wrapper's pid and killing it would orphan the worker -- leaving a
+# process holding a lease and talking to a paid API after the script exits.
+WORKER_BIN="$(mktemp -d)/anchor-worker"
+go build -o "$WORKER_BIN" ./cmd/anchor-worker
+"$WORKER_BIN" -provider anthropic -pool 1 -id live-check &
 WORKER_PID=$!
-trap 'kill -TERM $WORKER_PID 2>/dev/null || true' EXIT
+trap 'kill -TERM "$WORKER_PID" 2>/dev/null || true; wait "$WORKER_PID" 2>/dev/null || true' EXIT
 sleep 2
 
 echo "==> submitting"

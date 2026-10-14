@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"time"
 
 	"github.com/marlmelara/anchor/internal/agent"
@@ -513,7 +514,11 @@ func (e *execution) scheduleStep(
 		return fmt.Errorf("commit reservation: %w", err)
 	}
 
-	seed := e.w.rng.Int63()
+	// Recorded so a replay reseeds identically. The generator here is the
+	// package-level one from math/rand/v2, which is safe for concurrent use;
+	// what matters for determinism is that the value is journaled, not where it
+	// came from.
+	seed := rand.Int64()
 	return e.append(ctx, store.PendingEvent{
 		Type: journal.TypeStepScheduled,
 		Payload: journal.StepScheduledPayload{

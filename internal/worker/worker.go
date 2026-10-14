@@ -11,7 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math/rand"
+	"math/rand/v2"
 	"time"
 
 	"github.com/google/uuid"
@@ -93,10 +93,6 @@ type Worker struct {
 	tools    *tool.Registry
 	runner   tool.Runner
 	cfg      Config
-
-	// rng supplies retry jitter. Seeded per worker so two workers retrying the
-	// same provider outage do not march in lockstep.
-	rng *rand.Rand
 }
 
 func New(s *store.Store, p provider.Provider, tools *tool.Registry, runner tool.Runner, cfg Config) *Worker {
@@ -110,7 +106,6 @@ func New(s *store.Store, p provider.Provider, tools *tool.Registry, runner tool.
 		tools:    tools,
 		runner:   runner,
 		cfg:      cfg,
-		rng:      rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 }
 
@@ -267,13 +262,17 @@ func (w *Worker) heartbeat(ctx context.Context, runID uuid.UUID, cancelRun conte
 // backoff returns the delay before a step's next attempt: exponential, with
 // jitter so a fleet retrying one provider outage does not synchronise into a
 // thundering herd.
+//
+// math/rand/v2's top-level functions are safe for concurrent use. A shared
+// *rand.Rand is not, and every goroutine in the pool calls this -- the race
+// detector caught exactly that.
 func (w *Worker) backoff(attempt int) time.Duration {
 	d := w.cfg.BaseBackoff << attempt
 	if d > w.cfg.MaxBackoff {
 		d = w.cfg.MaxBackoff
 	}
-	jitter := time.Duration(w.rng.Int63n(int64(d/2) + 1))
-	return d/2 + jitter
+	half := int64(d / 2)
+	return d/2 + time.Duration(rand.N(half+1))
 }
 
 // failRun writes a terminal RunFailed for a run that cannot continue.

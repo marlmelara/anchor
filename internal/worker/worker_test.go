@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"sync"
 	"testing"
 	"time"
@@ -15,30 +14,14 @@ import (
 	"github.com/marlmelara/anchor/internal/journal"
 	"github.com/marlmelara/anchor/internal/provider"
 	"github.com/marlmelara/anchor/internal/store"
+	"github.com/marlmelara/anchor/internal/testsupport"
 	"github.com/marlmelara/anchor/internal/tool"
 	"github.com/marlmelara/anchor/internal/worker"
 )
 
 func testStore(t *testing.T) *store.Store {
 	t.Helper()
-	dsn := os.Getenv("ANCHOR_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("ANCHOR_TEST_DATABASE_URL is not set; skipping database tests")
-	}
-	ctx := context.Background()
-	s, err := store.Open(ctx, store.Config{DSN: dsn, MaxConns: 24})
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	t.Cleanup(s.Close)
-	if _, err := s.Migrate(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	if _, err := s.Pool().Exec(ctx,
-		`TRUNCATE queue, leases, steps, run_events, runs, agents RESTART IDENTITY CASCADE`); err != nil {
-		t.Fatalf("truncate: %v", err)
-	}
-	return s
+	return testsupport.Store(t, "test_worker")
 }
 
 // twoNodeGraph is the M2 target: one model_call feeding one tool_call.

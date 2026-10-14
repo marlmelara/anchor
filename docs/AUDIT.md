@@ -162,35 +162,52 @@ needs anyway.
 
 ---
 
-## Demo scripts: written, not verified
+## Demo scripts
 
-`make chaos` and `make live-check` existed only in `.PHONY` with no rule, so
-both were silent no-ops (`make: Nothing to be done for ...`). A string
-replacement failed quietly and the verification checked the wrong thing: the
-`.PHONY` line and the script's `bash -n` syntax, never whether the rule existed.
-Fixed 2026-10-14; confirmed with `make -n`.
-
-Current status of the two shell entry points:
+Both `make chaos` and `make live-check` originally existed only in `.PHONY`
+with no recipe, so each was a silent no-op. Fixed 2026-10-14, confirmed with
+`make -n` and then by running both.
 
 | Script | Status |
 |---|---|
-| `scripts/chaos.sh` | **Never completed a run.** Syntax-checked only. An attempted run was interrupted and left a worker process respawning, which had to be killed by hand. |
-| `scripts/live-check.sh` | **Never run.** Needs a real Anthropic credential. |
+| `scripts/chaos.sh` | **pass (2026-10-14)** — `make chaos` at defaults: 7 kills, 5 runs resumed, 40/40 completed, 40 effects for 40 runs, projections verified, exit 0 |
+| `scripts/live-check.sh` | **pass (2026-10-14)** — see M4 criterion 4 |
 
-**What this does not affect.** M3's acceptance criteria were proven by the Go
-chaos suite -- `TestChaosLoopLosesNoRunsAndDuplicatesNoEffects` and
-`TestRollingRestartStrandsNoRuns` -- which spawn real worker processes, send
-real `SIGKILL`, and run in CI. Those remain verified. The shell scripts are
-convenience wrappers for the demo video, and a broken wrapper does not weaken
-the test evidence.
+### Three bugs in the chaos script, all found by running it
 
-**Lesson, recorded because it recurred.** Three times now a check has passed
-while testing the wrong thing: the chaos suite that passed after one kill, the
-memory-limit test whose command never allocated, and these two phantom make
-targets. In each case the verification step existed but confirmed something
-adjacent to the claim. The habit that catches it is asserting on the *effect*
-rather than on the setup -- a kill count rather than a green test, exit 137
-rather than a non-zero exit, `make -n <target>` rather than a grep of `.PHONY`.
+**1. `kill -9` killed the log filter, not the worker.** The worker was started as
+`"$WORKER_BIN" ... | sed "s/^/[worker-N] /" &`, and in a pipeline the shell sets
+`$!` to the **last** command. So every kill took out `sed` and left the worker
+running. Workers accumulated across the loop.
+
+Fixed with process substitution — `> >(sed ...)` — which leaves the worker as
+the backgrounded command, so `$!` is the pid that needs killing.
+
+This is the same mistake as the `go run` one in `live-check.sh`, reintroduced
+through a different mechanism. The general rule: whenever a backgrounded command
+is composed with anything, check what `$!` actually refers to.
+
+**2. A bare `wait` in the cleanup trap hung the script forever.** With surviving
+workers from bug 1, `wait` with no arguments blocks on every background job.
+The script ran for over ten minutes before being killed by hand, leaving
+workers running on the machine. Cleanup now kills by pid and never calls an
+unqualified `wait`.
+
+**3. The work finished before the kills landed.** At the original parameters
+(`-pool 2`, 400ms model calls) 40 runs completed in about five seconds against a
+30-second kill loop, so the kills hit idle workers and nothing was ever
+interrupted. Defaults are now one goroutine per worker and a 2s model call, so
+40 runs take roughly 27s against a 20s loop.
+
+The script now **fails** rather than warns when `RESUMED` is zero: a green chaos
+run that never interrupted anything proves nothing, and the whole claim is that
+a killed worker's run gets picked up and finished.
+
+### Isolation
+
+The demo runs in its own `chaos_demo` schema (`anchorctl` gained a `-schema`
+flag on every subcommand) rather than truncating `public`. The earlier version
+would have destroyed the live-check evidence every time it ran.
 
 ### Process deliverables added
 

@@ -28,9 +28,12 @@ type Definition struct {
 	InputSchema  json.RawMessage `json:"input_schema,omitempty"`
 	OutputSchema json.RawMessage `json:"output_schema,omitempty"`
 
-	// Image, Timeout and the resource caps are honoured by the Docker runner
-	// in M4; the mock runner ignores them.
-	Image       string        `json:"image,omitempty"`
+	// Image, Command, Timeout and the resource caps are honoured by the Docker
+	// runner; the mock runner ignores them.
+	Image string `json:"image,omitempty"`
+	// Command overrides the image's default entrypoint. The process must read
+	// its JSON input from stdin and write JSON to stdout.
+	Command     []string      `json:"command,omitempty"`
 	Timeout     time.Duration `json:"timeout,omitempty"`
 	MemoryBytes int64         `json:"memory_bytes,omitempty"`
 	NanoCPUs    int64         `json:"nano_cpus,omitempty"`

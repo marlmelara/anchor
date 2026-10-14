@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/marlmelara/anchor/internal/provider"
+	"github.com/marlmelara/anchor/internal/sandbox"
 	"github.com/marlmelara/anchor/internal/store"
 	"github.com/marlmelara/anchor/internal/tool"
 	"github.com/marlmelara/anchor/internal/worker"
@@ -29,7 +30,9 @@ func main() {
 	workerID := flag.String("id", "", "worker id (default: hostname plus a random suffix)")
 	leaseFor := flag.Duration("lease", 30*time.Second, "lease duration")
 	heartbeat := flag.Duration("heartbeat", 10*time.Second, "lease renewal interval")
-	providerName := flag.String("provider", "mock", "model provider: mock (real providers arrive in M4)")
+	providerName := flag.String("provider", "mock", "model provider: mock or anthropic")
+	sandboxKind := flag.String("sandbox", "mock", "tool runner: mock (in-process) or docker")
+	allowEgress := flag.Bool("allow-egress", false, "permit network access to tools that declare it")
 	mockLatency := flag.Duration("mock-latency", 50*time.Millisecond, "fixed latency for the mock provider")
 	chaosTools := flag.Bool("chaos-tools", false, "register the chaos counting tool (test harness only)")
 	reapEvery := flag.Duration("reap", 5*time.Second, "how often to requeue runs whose lease expired")
@@ -42,6 +45,7 @@ func main() {
 		leaseFor: *leaseFor, heartbeat: *heartbeat, reapEvery: *reapEvery,
 		providerName: *providerName, mockLatency: *mockLatency,
 		chaosTools: *chaosTools, schema: *schema,
+		sandboxKind: *sandboxKind, allowEgress: *allowEgress,
 	}
 	if err := run(cfg, log); err != nil {
 		log.Error("fatal", "err", err)
@@ -61,6 +65,8 @@ type options struct {
 	mockLatency  time.Duration
 	chaosTools   bool
 	schema       string
+	sandboxKind  string
+	allowEgress  bool
 }
 
 func run(o options, log *slog.Logger) error {
@@ -99,26 +105,70 @@ func run(o options, log *slog.Logger) error {
 	}
 	defer s.Close()
 
-	if providerName != "mock" {
-		return fmt.Errorf("provider %q is not available yet; real adapters arrive in M4", providerName)
+	var modelProvider provider.Provider
+	switch providerName {
+	case "mock":
+		m := provider.NewMock("done")
+		m.Latency = mockLatency
+		modelProvider = m
+	case "anthropic":
+		// No API key is read here: the SDK resolves credentials itself, so an
+		// unset ANTHROPIC_API_KEY does not mean there are none -- a profile
+		// written by `ant auth login` works too.
+		modelProvider = provider.NewAnthropic(provider.AnthropicConfig{
+			Timeout: 2 * time.Minute,
+		})
+	default:
+		return fmt.Errorf("unknown provider %q (want mock or anthropic)", providerName)
 	}
-	mock := provider.NewMock("done")
-	mock.Latency = mockLatency
 
 	registry := tool.NewRegistry()
-	runner := tool.NewMockRunner()
+	mockRunner := tool.NewMockRunner()
 	echoDef, echoFn := tool.Echo("echo")
 	_ = registry.Register(echoDef)
-	runner.Handle("echo", echoFn)
+	mockRunner.Handle("echo", echoFn)
 
 	if chaosTools {
-		if err := registerChaosTool(context.Background(), s, registry, runner); err != nil {
+		if err := registerChaosTool(context.Background(), s, registry, mockRunner); err != nil {
 			return fmt.Errorf("register chaos tool: %w", err)
 		}
 		log.Info("chaos tools registered")
 	}
 
-	w := worker.New(s, mock, registry, runner, worker.Config{
+	var inner tool.Runner = mockRunner
+	if o.sandboxKind == "docker" {
+		box, err := sandbox.NewDocker(sandbox.Config{
+			WorkerID:    workerID,
+			AllowEgress: o.allowEgress,
+			Logf:        func(format string, args ...any) { log.Warn(fmt.Sprintf(format, args...)) },
+		})
+		if err != nil {
+			return fmt.Errorf("start sandbox: %w", err)
+		}
+		defer func() { _ = box.Close() }()
+		if err := box.Ping(context.Background()); err != nil {
+			return fmt.Errorf("docker is not reachable: %w", err)
+		}
+
+		// Sweep containers an earlier worker left behind. A worker killed
+		// mid-tool-call never ran its deferred removal, and each orphan holds
+		// memory and a CPU share the host has not reclaimed.
+		reaped, err := box.ReapOrphans(context.Background())
+		if err != nil {
+			log.Warn("reap orphaned containers", "err", err)
+		} else if reaped > 0 {
+			log.Info("reaped orphaned containers", "count", reaped)
+		}
+		inner = box
+	} else if o.sandboxKind != "mock" {
+		return fmt.Errorf("unknown sandbox %q (want mock or docker)", o.sandboxKind)
+	}
+
+	// Schema validation wraps whichever runner is in use, so the rule is
+	// written once and the sandbox and the mock behave identically.
+	runner := tool.NewValidatingRunner(inner)
+
+	w := worker.New(s, modelProvider, registry, runner, worker.Config{
 		WorkerID:       workerID,
 		PoolSize:       poolSize,
 		LeaseFor:       leaseFor,
@@ -127,7 +177,7 @@ func run(o options, log *slog.Logger) error {
 		Logf:           func(format string, args ...any) { log.Info(fmt.Sprintf(format, args...)) },
 	})
 
-	log.Info("worker started", "id", workerID, "pool", poolSize, "provider", providerName)
+	log.Info("worker started", "id", workerID, "pool", poolSize, "provider", providerName, "sandbox", o.sandboxKind)
 
 	done := make(chan error, 1)
 	go func() { done <- w.Run(claimCtx, runCtx) }()

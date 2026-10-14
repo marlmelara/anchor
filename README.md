@@ -32,13 +32,20 @@ partitioned log.
 
 ## Status
 
-Milestones 1 to 3 of 8 are complete. Runs are journaled, claimed from a
+Milestones 1 to 4 of 8 are complete. Runs are journaled, claimed from a
 `SKIP LOCKED` queue, and executed by a worker pool against a mock provider,
 with idempotency keys and retries. Workers that are `SIGKILL`ed lose no runs
 and duplicate no effects — proven by a chaos suite that kills real processes:
 
 ```bash
 make chaos
+```
+
+Tool calls run in resource-capped Docker containers, and the real Anthropic
+adapter sits behind the same interface as the mock:
+
+```bash
+make live-check          # one real run against the Anthropic API
 ```
 
 See [Milestones](#milestones).
@@ -127,7 +134,7 @@ EXECUTION
 |---|---|---|
 | `anchor-server` | Go | HTTP API, SSE streaming, validation, enqueue. Stateless. |
 | `anchor-worker` | Go | Claim runs via lease, fold journal, execute steps, journal results, heartbeat, retries, graceful drain. |
-| `anchor-sandbox` | Go | Docker API wrapper: one container per tool call, with limits, always removed. |
+| `anchor-sandbox` | Go | Docker API wrapper: one container per tool call, with limits, always removed. Orphans reaped on worker start. |
 | `trace-viewer` | TypeScript / Next.js | Read-only UI over the journal: run list, DAG, step detail, replay trigger. |
 | `sdk` | TypeScript | `defineAgent()`, `defineTool()`, `submitRun()`, `streamRun()`. |
 
@@ -186,8 +193,8 @@ choice costs.
 | M1 | Repo, Docker Compose, CI. Schema and migrations. Event append with `(run_id, seq)` uniqueness. Fold. `rebuild` command. Unit tests on the fold. | **done** |
 | M2 | `anchor-server` REST API. `SKIP LOCKED` queue. Worker pool claiming and executing a two-node graph. Idempotency keys enforced. Retries with backoff. | **done** |
 | M3 | Lease expiry takeover and the reaper. Chaos script. Crash recovery proven. | **done** |
-| M4 | Docker sandbox executor with limits; tool schema validation; real LLM provider adapter. | next |
-| M5 | Budgets, Redis token-bucket rate limiting, circuit breaker, backpressure. Prometheus metrics. | |
+| M4 | Docker sandbox executor with limits; tool schema validation; real LLM provider adapter. | **done** |
+| M5 | Budgets, Redis token-bucket rate limiting, circuit breaker, backpressure. Prometheus metrics. | next |
 | M6 | Deterministic replay end-to-end: `ReplaySource`, replay run type, divergence detection, fidelity report. | |
 | M7 | Trace viewer. TypeScript SDK. | |
 | M8 | k6 load tests, chaos suite in CI, measured benchmarks, demo video. | |

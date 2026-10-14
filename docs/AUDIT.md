@@ -104,6 +104,94 @@ because the step index came from `len(st.Steps)` rather than a walk cursor. It
 passed every single-worker test and only appeared under chaos. See the Struggles
 section of `docs/learning/M3-leases-crash-recovery.md`.
 
+---
+
+## M4 — Sandbox and real provider
+
+| # | Criterion | Status | Evidence |
+|---|---|---|---|
+| 1 | A tool that tries to use 1 GB of memory is killed | **pass** | `TestSandboxKillsAToolThatExceedsItsMemoryCap` — real container, 64 MB cap, `dd bs=1G`, killed with exit 137 |
+| 2 | A tool that tries network access without declaring it fails | **pass** | `TestSandboxDeniesNetworkToAToolThatDidNotDeclareEgress`, plus `TestSandboxDeniesEgressWhenTheDeploymentForbidsIt` for the second gate |
+| 3 | No containers remain after the chaos loop | **pass** | `TestSandboxLeavesNoContainersBehind` (5 calls including a timeout and an OOM) and `TestReapOrphansRemovesLeftoverContainers` |
+| 4 | One real end-to-end run against the Anthropic API succeeds | **pass (2026-10-14)** | Two runs of agent `live` completed against `claude-opus-5-5`, message `msg_011Cg2wM2PYRwvMgFkPSErTA`, 36 input / 143 output tokens. Verified from `runs` and the `ModelCallCompleted` payload, not from the script's own exit code. |
+
+Also covered: read-only root filesystem, non-root user, wall-clock timeout, and
+schema validation of both tool input (before a container starts) and output.
+
+Provider behaviour is tested against a local server speaking the Anthropic wire
+format: message/tool mapping, raw-body capture, retryable vs terminal status
+classification, connection failures, and refusal handling.
+
+**Model ids.** The build spec's example graphs use `claude-sonnet-4-6`, which
+predates the current generation. Current ids are `claude-opus-5-5` (default),
+`claude-sonnet-5-5`, `claude-haiku-5-5`. The adapter does not default a model —
+the graph supplies it — so nothing is hardcoded, but the README and
+`live-check.sh` use current ids.
+
+### Two findings from the real run
+
+**1. `cents_used` is always zero, so the cost budget can never fire.** The
+Anthropic adapter never sets `Response.Cents` -- the API does not return a cost,
+it returns token counts, and the price has to be applied per model. The column,
+the `budget_cents` field, and the budget check in the interpreter all exist and
+all currently compare against zero. The token budget works; the cost budget is
+dead code against the real provider.
+
+Confirmed by query: 2 runs with `tokens_used > 0` and `cents_used = 0`.
+
+This is the first thing M5 has to fix -- that milestone is "budgets, rate
+limits, breakers", and a budget that cannot trigger is not a budget. It needs a
+per-model price table keyed by the model id, applied to prompt and completion
+tokens separately, since they are priced differently.
+
+**2. The thinking-block gap is real, not theoretical.** The live response's
+content blocks are `text, thinking`. The thinking block carries an empty `text`
+(display defaults to omitted) and a `signature`. Current models bind those
+blocks to the conversation that produced them, so the gap described below
+affects real multi-turn runs, not just hypothetical ones. Single `model_call`
+nodes -- what the live check exercises -- are unaffected, which is why it
+passed.
+
+**Known gap, deferred to M6/M7.** Anchor rebuilds the message array for each
+`agent_loop` turn from its own state rather than echoing the provider's content
+blocks back verbatim. Current models bind reasoning blocks to the conversation
+that produced them, so a multi-turn loop against a real provider discards them.
+Single `model_call` nodes are unaffected. Fixing it means journaling the
+assistant content blocks and replaying them unchanged — which M6's replay source
+needs anyway.
+
+---
+
+## Demo scripts: written, not verified
+
+`make chaos` and `make live-check` existed only in `.PHONY` with no rule, so
+both were silent no-ops (`make: Nothing to be done for ...`). A string
+replacement failed quietly and the verification checked the wrong thing: the
+`.PHONY` line and the script's `bash -n` syntax, never whether the rule existed.
+Fixed 2026-10-14; confirmed with `make -n`.
+
+Current status of the two shell entry points:
+
+| Script | Status |
+|---|---|
+| `scripts/chaos.sh` | **Never completed a run.** Syntax-checked only. An attempted run was interrupted and left a worker process respawning, which had to be killed by hand. |
+| `scripts/live-check.sh` | **Never run.** Needs a real Anthropic credential. |
+
+**What this does not affect.** M3's acceptance criteria were proven by the Go
+chaos suite -- `TestChaosLoopLosesNoRunsAndDuplicatesNoEffects` and
+`TestRollingRestartStrandsNoRuns` -- which spawn real worker processes, send
+real `SIGKILL`, and run in CI. Those remain verified. The shell scripts are
+convenience wrappers for the demo video, and a broken wrapper does not weaken
+the test evidence.
+
+**Lesson, recorded because it recurred.** Three times now a check has passed
+while testing the wrong thing: the chaos suite that passed after one kill, the
+memory-limit test whose command never allocated, and these two phantom make
+targets. In each case the verification step existed but confirmed something
+adjacent to the claim. The habit that catches it is asserting on the *effect*
+rather than on the setup -- a kill count rather than a green test, exit 137
+rather than a non-zero exit, `make -n <target>` rather than a grep of `.PHONY`.
+
 ### Process deliverables added
 
 - `docs/learning/M1-journal-fold-rebuild.md` — the learning entry

@@ -61,6 +61,18 @@ milestone where it first appears, so revision can be scoped to what is built.
 | Takeover | Another worker claiming a run whose lease expired | `resumed: true` | M3 |
 | Zombie worker | One that froze, lost its lease, then resumed believing it still owns the run | Lease safety | M3 |
 
+| Default deny | Refusing by default and permitting only what is explicitly declared | Sandbox networking | M4 |
+| Exit 137 | 128 + SIGKILL — conventionally the OOM killer | Memory cap enforcement | M4 |
+| JSON Schema | A declarative description of a JSON value's shape | Tool input and output | M4 |
+| Linux capability | One of the individual privileges root normally holds, droppable separately | `CapDrop: ALL` | M4 |
+| `no-new-privileges` | A flag stopping a process gaining privilege through setuid | Sandbox hardening | M4 |
+| OOM killer | The kernel killing a process that exceeds its memory limit | Memory caps | M4 |
+| Orphan container | One whose creator died before removing it | `ReapOrphans` | M4 |
+| PID limit | A cap on processes in a container, stopping a fork bomb | Sandbox hardening | M4 |
+| Sandbox | A restricted environment limiting what code can reach | One container per tool call | M4 |
+| Schema validation | Checking data matches a declared shape before using it | `ValidatingRunner` | M4 |
+| stdcopy | Docker's multiplexed stream carrying stdout and stderr together | Reading tool output | M4 |
+
 ## Go terms
 
 | Term | Plain-English meaning | Python equivalent | M |

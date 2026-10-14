@@ -10,6 +10,9 @@ env:
   ANCHOR_TEST_DATABASE_URL: postgres://anchor:anchor@localhost:5432/anchor?sslmode=disable
   ANCHOR_DATABASE_URL: postgres://anchor:anchor@localhost:5432/anchor?sslmode=disable
   ANCHOR_REDIS_URL: redis://localhost:6379/0
+  # GitHub's ubuntu runners ship a working Docker daemon, so the sandbox tests
+  # run for real in CI rather than being skipped.
+  ANCHOR_TEST_DOCKER: "1"
 
 jobs:
   test:
@@ -70,6 +73,10 @@ jobs:
 
       - name: Build
         run: go build ./...
+
+      # The sandbox tests run real containers from this image.
+      - name: Pull the sandbox test image
+        run: docker pull alpine:3.20
 
       - name: Migrate
         run: go run ./cmd/anchorctl migrate

@@ -8,7 +8,7 @@ REDIS ?= redis://localhost:6380/0
 export ANCHOR_DATABASE_URL := $(DSN)
 export ANCHOR_REDIS_URL := $(REDIS)
 
-.PHONY: help up down reset-db migrate chaos test test-unit test-race lint tidy-check ci fmt vet build clean rebuild verify psql redis-cli cover
+.PHONY: help up down reset-db migrate chaos live-check test test-unit test-race lint tidy-check ci fmt vet build clean rebuild verify psql redis-cli cover
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
@@ -40,14 +40,14 @@ rebuild: ## Recompute the runs and steps projections from run_events
 verify: ## Check the projections against the fold without changing them
 	go run ./cmd/anchorctl rebuild -verify
 
-test: up migrate ## Run every test, including those needing Postgres
-	ANCHOR_TEST_DATABASE_URL="$(DSN)" go test ./...
+test: up migrate ## Run every test, including those needing Postgres and Docker
+	ANCHOR_TEST_DATABASE_URL="$(DSN)" ANCHOR_TEST_DOCKER=1 go test ./...
 
 test-unit: ## Run only the tests that need no database
 	go test ./internal/journal/ ./internal/idem/
 
 test-race: up migrate ## Run every test under the race detector
-	ANCHOR_TEST_DATABASE_URL="$(DSN)" go test -race ./...
+	ANCHOR_TEST_DATABASE_URL="$(DSN)" ANCHOR_TEST_DOCKER=1 go test -race ./...
 
 cover: up migrate ## Report test coverage
 	ANCHOR_TEST_DATABASE_URL="$(DSN)" go test ./... -coverprofile=coverage.out
@@ -71,7 +71,7 @@ tidy-check: ## Fail if go.mod or go.sum are not tidy
 	git diff --exit-code go.mod go.sum
 
 ci: tidy-check lint up migrate ## Run everything CI runs, locally
-	ANCHOR_TEST_DATABASE_URL="$(DSN)" go test -race -count=1 ./...
+	ANCHOR_TEST_DATABASE_URL="$(DSN)" ANCHOR_TEST_DOCKER=1 go test -race -count=1 ./...
 	go run ./cmd/anchorctl rebuild -verify
 
 build: ## Build all binaries into ./bin

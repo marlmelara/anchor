@@ -38,6 +38,10 @@ type Config struct {
 	HeartbeatEvery time.Duration
 	// IdlePoll is how long to wait before polling again when the queue is empty.
 	IdlePoll time.Duration
+	// ReapEvery is how often this worker looks for leases whose owner stopped
+	// heartbeating. Every worker reaps, so recovery does not depend on one
+	// designated process staying alive.
+	ReapEvery time.Duration
 
 	// MaxAttempts caps retries per step.
 	MaxAttempts int
@@ -65,6 +69,9 @@ func (c *Config) setDefaults() {
 	}
 	if c.IdlePoll <= 0 {
 		c.IdlePoll = 100 * time.Millisecond
+	}
+	if c.ReapEvery <= 0 {
+		c.ReapEvery = 5 * time.Second
 	}
 	if c.MaxAttempts <= 0 {
 		c.MaxAttempts = 3
@@ -121,6 +128,30 @@ func (w *Worker) ID() string { return w.cfg.WorkerID }
 // mid-step for another worker to redo.
 func (w *Worker) Run(claimCtx, runCtx context.Context) error {
 	g, claimCtx := errgroup.WithContext(claimCtx)
+
+	// The reaper is what turns a dead worker's runs back into queued work. It
+	// is a peer of the claim loops, not a separate service, so there is no
+	// single process whose death stops recovery.
+	g.Go(func() error {
+		ticker := time.NewTicker(w.cfg.ReapEvery)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-claimCtx.Done():
+				return nil
+			case <-ticker.C:
+				n, err := w.store.ReapExpiredLeases(claimCtx)
+				if err != nil && claimCtx.Err() == nil {
+					w.cfg.Logf("reap: %v", err)
+					continue
+				}
+				if n > 0 {
+					w.cfg.Logf("reaped %d run(s) from expired leases", n)
+				}
+			}
+		}
+	})
+
 	for i := 0; i < w.cfg.PoolSize; i++ {
 		g.Go(func() error {
 			for claimCtx.Err() == nil {

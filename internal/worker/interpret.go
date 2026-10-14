@@ -53,7 +53,7 @@ func (w *Worker) interpret(ctx context.Context, st *journal.RunState, graph *age
 	}
 
 	// The run's output is the last node's output.
-	var final json.RawMessage = json.RawMessage(`{}`)
+	final := json.RawMessage(`{}`)
 	if n := len(graph.Nodes); n > 0 {
 		if out, ok := ex.outputs[graph.Nodes[n-1].ID]; ok {
 			final = out

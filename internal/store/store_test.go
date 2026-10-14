@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"testing"
 	"time"
 
@@ -14,6 +13,7 @@ import (
 	"github.com/marlmelara/anchor/internal/idem"
 	"github.com/marlmelara/anchor/internal/journal"
 	"github.com/marlmelara/anchor/internal/store"
+	"github.com/marlmelara/anchor/internal/testsupport"
 )
 
 // These tests run against a real Postgres. There is no mock: every property
@@ -24,28 +24,7 @@ import (
 //	ANCHOR_TEST_DATABASE_URL=postgres://anchor:anchor@localhost:5433/anchor?sslmode=disable go test ./...
 func testStore(t *testing.T) *store.Store {
 	t.Helper()
-	dsn := os.Getenv("ANCHOR_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("ANCHOR_TEST_DATABASE_URL is not set; skipping database tests")
-	}
-	ctx := context.Background()
-	s, err := store.Open(ctx, store.Config{DSN: dsn, MaxConns: 8})
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	t.Cleanup(s.Close)
-
-	if _, err := s.Migrate(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	// TRUNCATE rather than DELETE: the append-only trigger on run_events is a
-	// row-level trigger, and TRUNCATE does not fire row-level triggers.
-	_, err = s.Pool().Exec(ctx,
-		`TRUNCATE queue, leases, steps, run_events, runs, agents RESTART IDENTITY CASCADE`)
-	if err != nil {
-		t.Fatalf("truncate: %v", err)
-	}
-	return s
+	return testsupport.Store(t, "test_store")
 }
 
 // seedAgent registers a trivial agent so runs have a valid (name, version) to

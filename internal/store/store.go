@@ -42,6 +42,11 @@ type Config struct {
 	// a claim transaction, so this must exceed the worker pool size or workers
 	// will queue on the pool instead of on the database.
 	MaxConns int32
+	// Schema sets search_path for every connection in the pool. Empty means the
+	// default (public). Test packages use it to get an isolated set of tables
+	// in one database, since Go runs package test binaries in parallel and they
+	// would otherwise truncate each other's rows.
+	Schema string
 }
 
 // Open connects and verifies the connection.
@@ -52,6 +57,12 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 	}
 	if cfg.MaxConns > 0 {
 		pcfg.MaxConns = cfg.MaxConns
+	}
+	if cfg.Schema != "" {
+		// RuntimeParams are sent at connection startup, so every connection the
+		// pool opens -- including ones created later to meet demand -- lands on
+		// the same search_path.
+		pcfg.ConnConfig.RuntimeParams["search_path"] = cfg.Schema
 	}
 	pool, err := pgxpool.NewWithConfig(ctx, pcfg)
 	if err != nil {

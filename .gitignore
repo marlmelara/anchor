@@ -9,6 +9,10 @@ coverage.*
 .env
 .env.local
 
+# Source material for the build, kept local. The committed artifacts in docs/
+# are what this produced; the scaffolding itself stays off the public repo.
+documentation/
+
 # tooling
 .claude/
 .DS_Store

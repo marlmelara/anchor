@@ -50,6 +50,17 @@ milestone where it first appears, so revision can be scoped to what is built.
 | Stateless service | Keeps no data between requests, so copies are interchangeable | `anchor-server` | M2 |
 | Worker pool | A fixed number of workers each handling one unit of work at a time | `anchor-worker` | M2 |
 
+| Chaos testing | Deliberately breaking things to prove recovery works | The chaos suite | M3 |
+| CTE | A named subquery in SQL, written `WITH name AS (...)` | The reaper | M3 |
+| Fault injection | Deliberately causing failures to test behaviour under them | `SIGKILL` loop | M3 |
+| Graceful shutdown | Stopping new work, finishing current work, then exiting | `SIGTERM` handling | M3 |
+| Lease expiry | Ownership ending automatically because it was not renewed | Crash recovery | M3 |
+| Reaper | A background job cleaning up resources whose owner disappeared | `ReapExpiredLeases` | M3 |
+| Rolling restart | Replacing processes one at a time so the service stays up | Deploy path | M3 |
+| `SIGKILL` / `SIGTERM` | `SIGTERM` asks a process to stop and allows cleanup; `SIGKILL` stops it instantly with none | Chaos vs deploys | M3 |
+| Takeover | Another worker claiming a run whose lease expired | `resumed: true` | M3 |
+| Zombie worker | One that froze, lost its lease, then resumed believing it still owns the run | Lease safety | M3 |
+
 ## Go terms
 
 | Term | Plain-English meaning | Python equivalent | M |

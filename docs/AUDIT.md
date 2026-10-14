@@ -84,6 +84,26 @@ sandbox and a real provider (M4), rate limits, circuit breakers and metrics
 (M5). `branch` and `map` nodes validate but return "not implemented yet" rather
 than silently skipping.
 
+---
+
+## M3 — Leases and crash recovery
+
+| # | Criterion | Status | Evidence |
+|---|---|---|---|
+| 1 | Under the chaos loop, no run is lost | **pass** | `TestChaosLoopLosesNoRunsAndDuplicatesNoEffects` — 60 runs, 3 real worker processes, a random one `SIGKILL`ed every 900ms. Asserts a minimum kill count and at least one `resumed: true` so the suite cannot pass without exercising recovery |
+| 2 | The counting tool shows zero duplicate effects | **pass** | Same test: effect rows must equal run count exactly. The effect is a committed row in `chaos_effects`, not an in-process counter |
+| 3 | A rolling restart strands no runs | **pass** | `TestRollingRestartStrandsNoRuns` — `SIGTERM` each worker in turn, all runs complete, effects fire exactly once |
+
+Supporting: `TestReaperRequeuesExpiredLeases`, `TestReaperIgnoresTerminalRuns`,
+`TestZombieWorkerCannotAdvanceARunItLost`, and
+`TestResumeReusesCompletedStepsInsteadOfRepeatingThem` — the last verified by
+reintroducing the bug and watching it fail.
+
+**One real bug found.** Resumption re-executed the whole graph at new indexes
+because the step index came from `len(st.Steps)` rather than a walk cursor. It
+passed every single-worker test and only appeared under chaos. See the Struggles
+section of `docs/learning/M3-leases-crash-recovery.md`.
+
 ### Process deliverables added
 
 - `docs/learning/M1-journal-fold-rebuild.md` — the learning entry

@@ -323,6 +323,45 @@ at claim time rather than at execution time.
 
 ---
 
+### Every worker runs the reaper
+
+**Chose:** the lease reaper is a goroutine inside every worker process.
+
+**Alternative:** one designated reaper process, or a cron job.
+
+**Why:** a single reaper is one more process whose death stops recovery — and
+recovery is precisely the thing that has to keep working when processes die.
+Putting it in every worker means the fleet heals itself as long as any worker is
+alive.
+
+**Cost:** N workers each run the reap query on their own interval, so the
+database sees N times the reap traffic. The query is cheap and indexed on
+`expires_at`, but at large fleet sizes the interval has to grow or the reaper has
+to move behind an advisory lock.
+
+---
+
+### Chaos tests spawn real processes and send real SIGKILL
+
+**Chose:** the chaos suite builds the worker binary, runs it as subprocesses,
+and kills them with `SIGKILL`. The effect it counts is a committed database row.
+
+**Alternative:** simulate a crash in-process by cancelling a context or dropping
+a lease.
+
+**Why:** an in-process "crash" leaves the Go runtime intact. Deferred functions
+still run, the lease still gets released, state still gets flushed — all the
+cleanup a `SIGKILL`ed process never gets. Simulating the failure would test a
+gentler failure than the one being claimed. The effect is a database row for the
+same reason: an in-memory counter dies with the process holding it, so it could
+never measure what happened across a kill.
+
+**Cost:** the suite is slow (about 15 seconds), needs a built binary, and cannot
+run under `-short`. It also cannot run where spawning processes is restricted.
+The alternative is faster and proves less.
+
+---
+
 ### Short retry backoffs wait in place; long ones park the run
 
 **Chose:** a backoff of up to one second is slept through inside the worker;

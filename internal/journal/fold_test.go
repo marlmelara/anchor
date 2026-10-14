@@ -78,7 +78,7 @@ func submitted(t *testing.T) *logBuilder {
 		AgentVersion: 1,
 		Input:        json.RawMessage(`{"q":"why is the sky blue"}`),
 		BudgetTokens: 100000,
-		BudgetCents:  500,
+		BudgetMicros: 500,
 	})
 }
 
@@ -125,7 +125,7 @@ func TestFoldCompleteModelRun(t *testing.T) {
 		add(TypeModelCallCompleted, ModelCallCompletedPayload{
 			Versioned: v(), StepIndex: 0, Model: "claude-sonnet-4-6",
 			Response:     json.RawMessage(`{"text":"rayleigh scattering"}`),
-			PromptTokens: 120, CompletionTokens: 80, Cents: 3,
+			PromptTokens: 120, CompletionTokens: 80, CostMicros: 3,
 		}).
 		add(TypeRunCompleted, RunCompletedPayload{
 			Versioned: v(), Output: json.RawMessage(`{"answer":"rayleigh scattering"}`),
@@ -142,8 +142,8 @@ func TestFoldCompleteModelRun(t *testing.T) {
 	if s.TokensUsed != 200 {
 		t.Errorf("TokensUsed = %d, want 200", s.TokensUsed)
 	}
-	if s.CentsUsed != 3 {
-		t.Errorf("CentsUsed = %d, want 3", s.CentsUsed)
+	if s.MicrosUsed != 3 {
+		t.Errorf("MicrosUsed = %d, want 3", s.MicrosUsed)
 	}
 	if len(s.Steps) != 1 {
 		t.Fatalf("len(Steps) = %d, want 1", len(s.Steps))
@@ -152,8 +152,8 @@ func TestFoldCompleteModelRun(t *testing.T) {
 	if st.Status != StepStatusCompleted {
 		t.Errorf("step status = %q, want %q", st.Status, StepStatusCompleted)
 	}
-	if st.Tokens != 200 || st.Cents != 3 {
-		t.Errorf("step accounting = %d tokens %d cents, want 200/3", st.Tokens, st.Cents)
+	if st.Tokens != 200 || st.CostMicros != 3 {
+		t.Errorf("step accounting = %d tokens %d cents, want 200/3", st.Tokens, st.CostMicros)
 	}
 	if st.RandSeed != 42 {
 		t.Errorf("RandSeed = %d, want 42", st.RandSeed)
@@ -200,8 +200,8 @@ func TestFoldToolStepRecordsOutput(t *testing.T) {
 		t.Errorf("tool output = %s", st.ToolOutput)
 	}
 	// Tool steps cost no tokens; only model calls move the budget.
-	if s.TokensUsed != 0 || s.CentsUsed != 0 {
-		t.Errorf("tool step moved the budget: %d tokens %d cents", s.TokensUsed, s.CentsUsed)
+	if s.TokensUsed != 0 || s.MicrosUsed != 0 {
+		t.Errorf("tool step moved the budget: %d tokens %d cents", s.TokensUsed, s.MicrosUsed)
 	}
 }
 
@@ -215,15 +215,15 @@ func TestFoldAccumulatesAcrossSteps(t *testing.T) {
 			add(TypeModelCallStarted, ModelCallStartedPayload{Versioned: v(), StepIndex: i, Model: "m"}).
 			add(TypeModelCallCompleted, ModelCallCompletedPayload{
 				Versioned: v(), StepIndex: i, Model: "m",
-				PromptTokens: 10, CompletionTokens: 5, Cents: 2,
+				PromptTokens: 10, CompletionTokens: 5, CostMicros: 2,
 			})
 	}
 	s := mustFold(t, b.events())
 	if s.TokensUsed != 45 {
 		t.Errorf("TokensUsed = %d, want 45", s.TokensUsed)
 	}
-	if s.CentsUsed != 6 {
-		t.Errorf("CentsUsed = %d, want 6", s.CentsUsed)
+	if s.MicrosUsed != 6 {
+		t.Errorf("MicrosUsed = %d, want 6", s.MicrosUsed)
 	}
 	if len(s.Steps) != 3 {
 		t.Errorf("len(Steps) = %d, want 3", len(s.Steps))
@@ -335,7 +335,7 @@ func TestFoldRetrySucceedsOnSecondAttempt(t *testing.T) {
 		add(TypeModelCallStarted, ModelCallStartedPayload{Versioned: v(), StepIndex: 0, Attempt: 1, Model: "m"}).
 		add(TypeModelCallCompleted, ModelCallCompletedPayload{
 			Versioned: v(), StepIndex: 0, Attempt: 1, Model: "m",
-			PromptTokens: 10, CompletionTokens: 10, Cents: 1,
+			PromptTokens: 10, CompletionTokens: 10, CostMicros: 1,
 		})
 
 	s := mustFold(t, b.events())
@@ -585,7 +585,7 @@ func TestFoldIsDeterministic(t *testing.T) {
 		}).
 		add(TypeModelCallStarted, ModelCallStartedPayload{Versioned: v(), StepIndex: 0, Model: "m"}).
 		add(TypeModelCallCompleted, ModelCallCompletedPayload{
-			Versioned: v(), StepIndex: 0, Model: "m", PromptTokens: 3, CompletionTokens: 4, Cents: 1,
+			Versioned: v(), StepIndex: 0, Model: "m", PromptTokens: 3, CompletionTokens: 4, CostMicros: 1,
 		}).
 		add(TypeRunCompleted, RunCompletedPayload{Versioned: v(), Output: json.RawMessage(`{"ok":true}`)}).
 		events()
@@ -771,4 +771,116 @@ func TestEveryEventTypeHasFoldCoverage(t *testing.T) {
 			t.Errorf("event type %s is never folded in a test; add one", typ)
 		}
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Payload v1 compatibility
+//
+// v2 moved money from whole cents to micro-dollars. A run recorded before that
+// change must still fold to the same state, or the "old runs still replay"
+// property is a claim rather than a fact. These construct genuine v1 payloads
+// by hand -- the typed structs now default to v2, so the only honest way to
+// test a v1 read is to write the bytes a v1 build would have written.
+// ---------------------------------------------------------------------------
+
+func TestFoldReadsMoneyFromV1Payloads(t *testing.T) {
+	b := newLog(t).
+		addRaw(TypeRunSubmitted, `{"v":1,"tenant_id":"acme","agent_name":"research","input":{},
+		                           "budget_tokens":100000,"budget_cents":50}`).
+		addRaw(TypeRunStarted, `{"v":1,"worker_id":"w-1"}`).
+		addRaw(TypeStepScheduled, `{"v":1,"step_index":0,"kind":"model","name":"m",
+		                            "idempotency_key":"k0","rand_seed":1}`).
+		addRaw(TypeModelCallStarted, `{"v":1,"step_index":0,"attempt":0,"model":"m"}`).
+		addRaw(TypeModelCallCompleted, `{"v":1,"step_index":0,"attempt":0,"model":"m",
+		                                 "prompt_tokens":100,"completion_tokens":50,"cents":7}`)
+
+	s := mustFold(t, b.events())
+
+	// 50 cents of budget is 500,000 micro-dollars.
+	if s.BudgetMicros != 500_000 {
+		t.Errorf("BudgetMicros = %d, want 500000 (50 cents)", s.BudgetMicros)
+	}
+	// 7 cents of spend is 70,000 micro-dollars.
+	if s.MicrosUsed != 70_000 {
+		t.Errorf("MicrosUsed = %d, want 70000 (7 cents)", s.MicrosUsed)
+	}
+	if s.Steps[0].CostMicros != 70_000 {
+		t.Errorf("step CostMicros = %d, want 70000", s.Steps[0].CostMicros)
+	}
+	// Everything else must be unaffected by the unit change.
+	if s.TokensUsed != 150 {
+		t.Errorf("TokensUsed = %d, want 150", s.TokensUsed)
+	}
+}
+
+// A v1 BudgetExceeded used the resource name "cents". The fold must still
+// accept it, or an old run that died on budget becomes unreplayable.
+func TestFoldAcceptsV1CentsBudgetResource(t *testing.T) {
+	b := submitted(t).
+		addRaw(TypeBudgetExceeded, `{"v":1,"resource":"cents","limit":50,"used":49,"projected":60}`).
+		addRaw(TypeRunFailed, `{"v":1,"error":"budget exceeded"}`)
+
+	s := mustFold(t, b.events())
+	if s.Status != RunStatusFailed {
+		t.Errorf("status = %q, want failed", s.Status)
+	}
+}
+
+// A v1 payload that carried no money at all folds to zero, not to an error.
+func TestFoldHandlesV1PayloadsWithNoMoneyFields(t *testing.T) {
+	b := newLog(t).
+		addRaw(TypeRunSubmitted, `{"v":1,"tenant_id":"acme","agent_name":"a","input":{}}`).
+		addRaw(TypeRunStarted, `{"v":1,"worker_id":"w"}`)
+	s := mustFold(t, b.events())
+	if s.BudgetMicros != 0 || s.MicrosUsed != 0 {
+		t.Errorf("budget=%d used=%d, want 0/0", s.BudgetMicros, s.MicrosUsed)
+	}
+}
+
+// A v2 payload must be read from the micro-dollar field, not the cents one.
+func TestFoldReadsMoneyFromV2Payloads(t *testing.T) {
+	b := started(t).
+		add(TypeStepScheduled, StepScheduledPayload{
+			Versioned: v(), StepIndex: 0, Kind: StepKindModel, IdempotencyKey: "k0",
+		}).
+		add(TypeModelCallStarted, ModelCallStartedPayload{Versioned: v(), StepIndex: 0, Model: "m"}).
+		add(TypeModelCallCompleted, ModelCallCompletedPayload{
+			Versioned: v(), StepIndex: 0, Model: "m",
+			PromptTokens: 36, CompletionTokens: 143, CostMicros: 3004,
+		})
+
+	s := mustFold(t, b.events())
+	if s.MicrosUsed != 3004 {
+		t.Errorf("MicrosUsed = %d, want 3004", s.MicrosUsed)
+	}
+}
+
+// An unpriced model records cost_unknown. The run's total is then a lower
+// bound, and a spending budget cannot be enforced over it -- recording the
+// difference is what stops a budget silently passing.
+func TestFoldMarksCostIncompleteWhenAModelWasUnpriced(t *testing.T) {
+	b := started(t).
+		add(TypeStepScheduled, StepScheduledPayload{
+			Versioned: v(), StepIndex: 0, Kind: StepKindModel, IdempotencyKey: "k0",
+		}).
+		add(TypeModelCallStarted, ModelCallStartedPayload{Versioned: v(), StepIndex: 0, Model: "mystery"}).
+		add(TypeModelCallCompleted, ModelCallCompletedPayload{
+			Versioned: v(), StepIndex: 0, Model: "mystery",
+			PromptTokens: 100, CompletionTokens: 50, CostUnknown: true,
+		})
+
+	s := mustFold(t, b.events())
+	if !s.CostIncomplete {
+		t.Error("CostIncomplete = false; an unpriced call makes the total a lower bound, not the cost")
+	}
+	if s.TokensUsed != 150 {
+		t.Errorf("TokensUsed = %d; tokens are still counted even when cost is not", s.TokensUsed)
+	}
+}
+
+// The guard against reading a payload from a future build must still hold now
+// that the current version is 2.
+func TestFoldStillRejectsPayloadsFromTheFuture(t *testing.T) {
+	b := submitted(t).addRaw(TypeRunStarted, `{"v":99,"worker_id":"w-1"}`)
+	foldError(t, b.events(), "newer than this build understands")
 }

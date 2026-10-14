@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/marlmelara/anchor/internal/api"
+	"github.com/marlmelara/anchor/internal/metrics"
 	"github.com/marlmelara/anchor/internal/store"
 )
 
@@ -72,6 +73,7 @@ func run(addr, dsn string, highWater int64, migrate bool, log *slog.Logger) erro
 			QueueHighWaterMark: highWater,
 			APIKeys:            parseAPIKeys(os.Getenv("ANCHOR_API_KEYS")),
 			Logger:             log,
+			Metrics:            metrics.New(),
 		}).Routes(),
 		ReadHeaderTimeout: api.ReadHeaderTimeout,
 		ReadTimeout:       api.ReadTimeout,

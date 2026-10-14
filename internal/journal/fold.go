@@ -50,7 +50,7 @@ type StepState struct {
 	StartedAt      *time.Time `json:"started_at,omitempty"`
 	FinishedAt     *time.Time `json:"finished_at,omitempty"`
 	Tokens         int64      `json:"tokens"`
-	Cents          int64      `json:"cents"`
+	CostMicros     int64      `json:"cost_micros"`
 	Error          string     `json:"error,omitempty"`
 
 	// Recorded non-determinism. Exactly one of these is populated on a
@@ -77,9 +77,16 @@ type RunState struct {
 	Status       RunStatus       `json:"status"`
 
 	BudgetTokens int64 `json:"budget_tokens"`
-	BudgetCents  int64 `json:"budget_cents"`
+	// BudgetMicros is the spending cap in micro-dollars (1e-6 USD). Cents are
+	// too coarse: one short model call costs a fraction of a cent, so an
+	// integer-cent budget rounds to zero and can never trigger.
+	BudgetMicros int64 `json:"budget_micros"`
 	TokensUsed   int64 `json:"tokens_used"`
-	CentsUsed    int64 `json:"cents_used"`
+	MicrosUsed   int64 `json:"micros_used"`
+	// CostIncomplete is set when any call in this run had no price. The total
+	// is then a LOWER BOUND, not the cost, and a spending budget cannot be
+	// enforced over it.
+	CostIncomplete bool `json:"cost_incomplete,omitempty"`
 
 	CreatedAt      time.Time       `json:"created_at"`
 	StartedAt      *time.Time      `json:"started_at,omitempty"`
@@ -257,7 +264,7 @@ func (s *RunState) applyRunSubmitted(e Event) error {
 	s.AgentVersion = p.AgentVersion
 	s.Input = p.Input
 	s.BudgetTokens = p.BudgetTokens
-	s.BudgetCents = p.BudgetCents
+	s.BudgetMicros = p.BudgetMicroDollars()
 	s.ReplayOf = p.ReplayOf
 	s.CreatedAt = e.CreatedAt
 	s.Status = RunStatusPending
@@ -337,7 +344,7 @@ func (s *RunState) applyModelCallCompleted(e Event) error {
 	st.Status = StepStatusCompleted
 	st.ModelResponse = p.Response
 	st.Tokens = p.TotalTokens()
-	st.Cents = p.Cents
+	st.CostMicros = p.CostMicroDollars()
 	t := e.CreatedAt
 	st.FinishedAt = &t
 
@@ -345,7 +352,11 @@ func (s *RunState) applyModelCallCompleted(e Event) error {
 	// worker's live check, the rebuilt projection, and the trace viewer all get
 	// the same number from the same code.
 	s.TokensUsed += p.TotalTokens()
-	s.CentsUsed += p.Cents
+	s.MicrosUsed += p.CostMicroDollars()
+	if p.CostUnknown {
+		// One unpriced call makes the whole run's total a lower bound.
+		s.CostIncomplete = true
+	}
 	return nil
 }
 
@@ -432,7 +443,7 @@ func (s *RunState) applyBudgetExceeded(e Event) error {
 	if err != nil {
 		return err
 	}
-	if p.Resource != "tokens" && p.Resource != "cents" {
+	if p.Resource != "tokens" && p.Resource != "micros" && p.Resource != "cents" {
 		return fmt.Errorf("invalid budget resource %q", p.Resource)
 	}
 	// BudgetExceeded records why the run is about to die but is not itself

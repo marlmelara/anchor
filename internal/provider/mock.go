@@ -42,7 +42,6 @@ func NewMock(text string) *Mock {
 			Text:             text,
 			PromptTokens:     10,
 			CompletionTokens: 5,
-			Cents:            1,
 			Raw:              json.RawMessage(`{"mock":true}`),
 		},
 	}
@@ -100,23 +99,21 @@ func (m *Mock) Complete(ctx context.Context, req Request) (Response, error) {
 }
 
 // TextReply builds a scripted final answer.
-func TextReply(text string, promptTokens, completionTokens, cents int64) Response {
+func TextReply(text string, promptTokens, completionTokens int64) Response {
 	return Response{
 		Text:             text,
 		PromptTokens:     promptTokens,
 		CompletionTokens: completionTokens,
-		Cents:            cents,
 		Raw:              json.RawMessage(fmt.Sprintf(`{"mock":true,"text":%q}`, text)),
 	}
 }
 
 // ToolReply builds a scripted response in which the model asks for a tool.
-func ToolReply(tool string, input json.RawMessage, promptTokens, completionTokens, cents int64) Response {
+func ToolReply(tool string, input json.RawMessage, promptTokens, completionTokens int64) Response {
 	return Response{
 		ToolCall:         &ToolCall{Name: tool, Input: input},
 		PromptTokens:     promptTokens,
 		CompletionTokens: completionTokens,
-		Cents:            cents,
 		Raw:              json.RawMessage(fmt.Sprintf(`{"mock":true,"tool":%q}`, tool)),
 	}
 }

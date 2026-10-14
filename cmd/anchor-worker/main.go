@@ -12,12 +12,18 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/redis/go-redis/v9"
+
+	"github.com/marlmelara/anchor/internal/metrics"
 	"github.com/marlmelara/anchor/internal/provider"
+	"github.com/marlmelara/anchor/internal/ratelimit"
 	"github.com/marlmelara/anchor/internal/sandbox"
 	"github.com/marlmelara/anchor/internal/store"
 	"github.com/marlmelara/anchor/internal/tool"
@@ -37,6 +43,12 @@ func main() {
 	chaosTools := flag.Bool("chaos-tools", false, "register the chaos counting tool (test harness only)")
 	reapEvery := flag.Duration("reap", 5*time.Second, "how often to requeue runs whose lease expired")
 	schema := flag.String("schema", "", "postgres search_path (default: public)")
+	redisURL := flag.String("redis", "", "redis URL for rate limits and the circuit breaker (default: $ANCHOR_REDIS_URL; empty disables both)")
+	tenantRate := flag.Float64("tenant-rate", 20, "sustained model calls per second per tenant")
+	tenantBurst := flag.Float64("tenant-burst", 40, "burst allowance per tenant")
+	providerRate := flag.Float64("provider-rate", 100, "sustained model calls per second against the provider")
+	providerBurst := flag.Float64("provider-burst", 200, "burst allowance against the provider")
+	metricsAddr := flag.String("metrics-addr", "", "serve Prometheus metrics on this address, e.g. :9090")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -46,6 +58,9 @@ func main() {
 		providerName: *providerName, mockLatency: *mockLatency,
 		chaosTools: *chaosTools, schema: *schema,
 		sandboxKind: *sandboxKind, allowEgress: *allowEgress,
+		redisURL: *redisURL, metricsAddr: *metricsAddr,
+		tenantRate: *tenantRate, tenantBurst: *tenantBurst,
+		providerRate: *providerRate, providerBurst: *providerBurst,
 	}
 	if err := run(cfg, log); err != nil {
 		log.Error("fatal", "err", err)
@@ -55,18 +70,24 @@ func main() {
 
 // options groups the flags so the signature stays readable as they accumulate.
 type options struct {
-	dsn          string
-	poolSize     int
-	workerID     string
-	leaseFor     time.Duration
-	heartbeat    time.Duration
-	reapEvery    time.Duration
-	providerName string
-	mockLatency  time.Duration
-	chaosTools   bool
-	schema       string
-	sandboxKind  string
-	allowEgress  bool
+	dsn           string
+	poolSize      int
+	workerID      string
+	leaseFor      time.Duration
+	heartbeat     time.Duration
+	reapEvery     time.Duration
+	providerName  string
+	mockLatency   time.Duration
+	chaosTools    bool
+	schema        string
+	sandboxKind   string
+	allowEgress   bool
+	redisURL      string
+	metricsAddr   string
+	tenantRate    float64
+	tenantBurst   float64
+	providerRate  float64
+	providerBurst float64
 }
 
 func run(o options, log *slog.Logger) error {
@@ -168,12 +189,66 @@ func run(o options, log *slog.Logger) error {
 	// written once and the sandbox and the mock behave identically.
 	runner := tool.NewValidatingRunner(inner)
 
+	// Metrics and shared protections. Both are optional: without Redis the
+	// worker runs with no rate limiting and no breaker, which is what the
+	// mock-provider benchmarks want so the numbers measure Anchor alone.
+	m := metrics.New()
+	// Create the zero-valued breaker series up front, so its dashboard panel
+	// reads 0 rather than "no data" before the first call.
+	m.InitProvider(modelProvider.Name())
+	var guards *worker.Guards
+	redisAddr := o.redisURL
+	if redisAddr == "" {
+		redisAddr = os.Getenv("ANCHOR_REDIS_URL")
+	}
+	if redisAddr != "" {
+		opts, err := redis.ParseURL(redisAddr)
+		if err != nil {
+			return fmt.Errorf("parse redis url: %w", err)
+		}
+		rdb := redis.NewClient(opts)
+		defer func() { _ = rdb.Close() }()
+		pingCtx, pingCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := rdb.Ping(pingCtx).Err(); err != nil {
+			pingCancel()
+			return fmt.Errorf("redis unreachable at %s: %w", redisAddr, err)
+		}
+		pingCancel()
+		guards = worker.NewGuards(rdb, worker.GuardConfig{
+			ProviderName: modelProvider.Name(),
+			PerTenant:    ratelimit.BucketConfig{Capacity: o.tenantBurst, RefillPerSecond: o.tenantRate},
+			PerProvider:  ratelimit.BucketConfig{Capacity: o.providerBurst, RefillPerSecond: o.providerRate},
+		})
+		log.Info("rate limits and circuit breaker enabled", "redis", redisAddr)
+	} else {
+		log.Info("no redis configured: rate limits and circuit breaker are disabled")
+	}
+
+	if o.metricsAddr != "" {
+		mux := http.NewServeMux()
+		mux.Handle("GET /metrics", promhttp.HandlerFor(m.Registry(), promhttp.HandlerOpts{}))
+		metricsSrv := &http.Server{Addr: o.metricsAddr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+		go func() {
+			if err := metricsSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Error("metrics server", "err", err)
+			}
+		}()
+		defer func() {
+			shutdownCtx, c := context.WithTimeout(context.Background(), 3*time.Second)
+			defer c()
+			_ = metricsSrv.Shutdown(shutdownCtx)
+		}()
+		log.Info("serving metrics", "addr", o.metricsAddr)
+	}
+
 	w := worker.New(s, modelProvider, registry, runner, worker.Config{
 		WorkerID:       workerID,
 		PoolSize:       poolSize,
 		LeaseFor:       leaseFor,
 		HeartbeatEvery: heartbeat,
 		ReapEvery:      o.reapEvery,
+		Guards:         guards,
+		Metrics:        m,
 		Logf:           func(format string, args ...any) { log.Info(fmt.Sprintf(format, args...)) },
 	})
 

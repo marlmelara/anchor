@@ -168,6 +168,8 @@ func fromSDKMessage(msg *anthropic.Message) (Response, error) {
 		CompletionTokens: msg.Usage.OutputTokens,
 		Raw:              json.RawMessage(msg.RawJSON()),
 	}
+	// No cost is set: the API does not return one. internal/pricing derives it
+	// from these token counts and the model id.
 
 	for _, block := range msg.Content {
 		switch b := block.AsAny().(type) {

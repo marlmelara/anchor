@@ -1,0 +1,428 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus",
+      "type": "datasource",
+      "pluginId": "prometheus",
+      "pluginName": "Prometheus"
+    }
+  ],
+  "title": "Anchor",
+  "uid": "anchor-overview",
+  "tags": [
+    "anchor",
+    "durable-execution"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "editable": true,
+  "description": "Anchor: durable execution runtime for AI agents. Panels are ordered by the question they answer: how fast is scheduling, is the queue keeping up, are runs finishing, are workers dying, what is it costing, and is anything being refused.",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Scheduling latency (claim to first step)",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(anchor_scheduling_latency_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(anchor_scheduling_latency_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(anchor_scheduling_latency_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "description": "How long a run waits between a worker claiming it and its first step starting. This is the number quoted as 'p99 scheduling latency'. Quantiles rather than an average because the tail is what users actually experience; an average hides it."
+    },
+    {
+      "id": 2,
+      "title": "Queue wait (submit to claim)",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(anchor_queue_wait_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(anchor_queue_wait_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p99",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "description": "Time a run sits in the queue before any worker picks it up. Distinct from scheduling latency, and the one that grows first when the fleet is undersized."
+    },
+    {
+      "id": 3,
+      "title": "Queue depth",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "anchor_queue_depth",
+          "legendFormat": "depth",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "description": "Runs waiting. The submit endpoint returns HTTP 429 above the high-water mark. A depth that climbs without falling means consumers cannot keep up."
+    },
+    {
+      "id": 4,
+      "title": "Step duration by kind",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 8,
+        "y": 8,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(anchor_step_duration_seconds_bucket[5m])) by (le, kind))",
+          "legendFormat": "p95 {{kind}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "description": "Model calls and tool calls have very different shapes; splitting them keeps one from hiding the other."
+    },
+    {
+      "id": 5,
+      "title": "Throughput (steps/sec)",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 16,
+        "y": 8,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(anchor_step_duration_seconds_count[1m]))",
+          "legendFormat": "steps/sec",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "description": "Measured against the mock provider so the figure describes Anchor rather than the model."
+    },
+    {
+      "id": 6,
+      "title": "Run outcomes",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 15,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(anchor_runs_finished_total[5m])) by (status)",
+          "legendFormat": "{{status}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "description": "needs_review is the one to watch: it means a non-idempotent effect's outcome is unknown and a human has to decide."
+    },
+    {
+      "id": 7,
+      "title": "Crash recovery (resumed runs)",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 8,
+        "y": 15,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(anchor_runs_started_total{resumed=\"true\"}[5m]))",
+          "legendFormat": "resumed",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(anchor_leases_reaped_total[5m]))",
+          "legendFormat": "leases reaped",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(rate(anchor_seq_conflicts_total[5m]))",
+          "legendFormat": "seq conflicts",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "description": "Resumptions and reaped leases both mean workers are dying. Sustained non-zero seq conflicts mean leases are expiring while work is still in flight -- the lease is too short for the step duration."
+    },
+    {
+      "id": 8,
+      "title": "Step failures",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 16,
+        "y": 15,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(anchor_steps_failed_total[5m])) by (kind, retryable)",
+          "legendFormat": "{{kind}} retryable={{retryable}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 9,
+      "title": "Spend rate",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 22,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(anchor_micro_dollars_spent_total[5m])) by (model) * 3600 / 1000000",
+          "legendFormat": "$/hour {{model}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "description": "Micro-dollars per second converted to dollars per hour. Spend is counted in micro-dollars because a single short call costs a fraction of a cent, which integer cents round to zero."
+    },
+    {
+      "id": 10,
+      "title": "Tokens",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 8,
+        "y": 22,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(anchor_tokens_used_total[5m])) by (model, direction)",
+          "legendFormat": "{{model}} {{direction}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 11,
+      "title": "Circuit breaker state",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 16,
+        "y": 22,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "anchor_breaker_state",
+          "legendFormat": "{{provider}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "description": "0 closed, 1 half-open, 2 open. Anything above 0 means calls are being refused without being attempted."
+    },
+    {
+      "id": 12,
+      "title": "Backpressure",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 29,
+        "w": 12,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(anchor_submits_rejected_total[5m]))",
+          "legendFormat": "429s",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(anchor_rate_limited_total[5m])) by (scope)",
+          "legendFormat": "deferred {{scope}}",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "description": "429s mean producers are being told to slow down. Deferrals mean a run was parked and requeued rather than a worker sleeping on it."
+    },
+    {
+      "id": 13,
+      "title": "Active leases",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 29,
+        "w": 12,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "anchor_active_leases",
+          "legendFormat": "leased",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "description": "Runs currently owned by a worker. Should track the fleet's total pool size under load."
+    }
+  ]
+}

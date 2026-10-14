@@ -19,6 +19,7 @@ import (
 
 	"github.com/marlmelara/anchor/internal/agent"
 	"github.com/marlmelara/anchor/internal/journal"
+	"github.com/marlmelara/anchor/internal/metrics"
 	"github.com/marlmelara/anchor/internal/provider"
 	"github.com/marlmelara/anchor/internal/store"
 	"github.com/marlmelara/anchor/internal/tool"
@@ -55,6 +56,12 @@ type Config struct {
 	MaxTokensPerCall int
 
 	Logf func(format string, args ...any)
+
+	// Guards are the shared rate limits and circuit breaker. Nil disables both,
+	// which is what unit tests and mock-provider benchmarks want.
+	Guards *Guards
+	// Metrics is optional; nil means no instrumentation.
+	Metrics *metrics.Metrics
 }
 
 func (c *Config) setDefaults() {
@@ -102,6 +109,14 @@ type Worker struct {
 	cfg      Config
 }
 
+// observe is a nil-safe metrics helper, so every call site is one line rather
+// than one line wrapped in a nil check.
+func (w *Worker) observe(fn func(m *metrics.Metrics)) {
+	if w.cfg.Metrics != nil {
+		fn(w.cfg.Metrics)
+	}
+}
+
 func New(s *store.Store, p provider.Provider, tools *tool.Registry, runner tool.Runner, cfg Config) *Worker {
 	cfg.setDefaults()
 	if cfg.WorkerID == "" {
@@ -147,6 +162,10 @@ func (w *Worker) Run(claimCtx, runCtx context.Context) error {
 				}
 				if n > 0 {
 					w.cfg.Logf("reaped %d run(s) from expired leases", n)
+					w.observe(func(m *metrics.Metrics) { m.LeasesReaped.Add(float64(n)) })
+				}
+				if depth, derr := w.store.QueueDepth(claimCtx); derr == nil {
+					w.observe(func(m *metrics.Metrics) { m.QueueDepth.Set(float64(depth)) })
 				}
 			}
 		}
@@ -237,7 +256,17 @@ func (w *Worker) executeRun(parent context.Context, runID uuid.UUID) {
 		return
 	}
 
+	claimedAt := w.store.Now()
+	if st.CreatedAt.Before(claimedAt) {
+		w.observe(func(m *metrics.Metrics) {
+			m.QueueWait.Observe(claimedAt.Sub(st.CreatedAt).Seconds())
+		})
+	}
+
 	resumed := st.StartedAt != nil
+	w.observe(func(m *metrics.Metrics) {
+		m.RunsStarted.WithLabelValues(fmt.Sprintf("%t", resumed)).Inc()
+	})
 	if err := w.store.Append(runCtx, st, store.PendingEvent{
 		Type: journal.TypeRunStarted,
 		Payload: journal.RunStartedPayload{
@@ -249,13 +278,19 @@ func (w *Worker) executeRun(parent context.Context, runID uuid.UUID) {
 		if errors.Is(err, store.ErrSeqConflict) {
 			// Another worker owns this run now. Stop touching it.
 			w.cfg.Logf("run %s: lost ownership at start", runID)
+			w.observe(func(m *metrics.Metrics) { m.SeqConflicts.Inc() })
 			return
 		}
 		w.cfg.Logf("run %s: append RunStarted: %v", runID, err)
 		return
 	}
 
-	outcome := w.interpret(runCtx, st, graph)
+	outcome := w.interpretFrom(runCtx, st, graph, claimedAt)
+	if st.Terminal() {
+		w.observe(func(m *metrics.Metrics) {
+			m.RunsFinished.WithLabelValues(string(st.Status)).Inc()
+		})
+	}
 	if outcome == outcomeParked {
 		// Already requeued with a future available_at; the lease went back with
 		// it, so do not release it again.

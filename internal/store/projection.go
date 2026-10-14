@@ -19,7 +19,7 @@ func upsertRun(ctx context.Context, tx pgx.Tx, st *journal.RunState) error {
 	_, err := tx.Exec(ctx, `
 		INSERT INTO runs (
 			id, tenant_id, agent_name, agent_version, status, input,
-			budget_tokens, budget_cents, tokens_used, cents_used,
+			budget_tokens, budget_micros, tokens_used, micros_used,
 			created_at, started_at, finished_at, terminal_output, error, replay_of
 		) VALUES (
 			$1, $2, $3, $4, $5, $6,
@@ -29,13 +29,13 @@ func upsertRun(ctx context.Context, tx pgx.Tx, st *journal.RunState) error {
 		ON CONFLICT (id) DO UPDATE SET
 			status          = EXCLUDED.status,
 			tokens_used     = EXCLUDED.tokens_used,
-			cents_used      = EXCLUDED.cents_used,
+			micros_used     = EXCLUDED.micros_used,
 			started_at      = EXCLUDED.started_at,
 			finished_at     = EXCLUDED.finished_at,
 			terminal_output = EXCLUDED.terminal_output,
 			error           = EXCLUDED.error`,
 		st.RunID, st.TenantID, st.AgentName, st.AgentVersion, string(st.Status), jsonOrEmpty(st.Input),
-		st.BudgetTokens, st.BudgetCents, st.TokensUsed, st.CentsUsed,
+		st.BudgetTokens, st.BudgetMicros, st.TokensUsed, st.MicrosUsed,
 		st.CreatedAt, st.StartedAt, st.FinishedAt, jsonOrNil(st.TerminalOutput), textOrNil(st.Error), st.ReplayOf,
 	)
 	if err != nil {
@@ -58,7 +58,7 @@ func upsertSteps(ctx context.Context, tx pgx.Tx, st *journal.RunState, indexes [
 		batch.Queue(`
 			INSERT INTO steps (
 				run_id, step_index, kind, name, node_id, idempotency_key,
-				status, attempt, started_at, finished_at, tokens, cents, error
+				status, attempt, started_at, finished_at, tokens, cost_micros, error
 			) VALUES (
 				$1, $2, $3, $4, $5, $6,
 				$7, $8, $9, $10, $11, $12, $13
@@ -69,10 +69,10 @@ func upsertSteps(ctx context.Context, tx pgx.Tx, st *journal.RunState, indexes [
 				started_at  = EXCLUDED.started_at,
 				finished_at = EXCLUDED.finished_at,
 				tokens      = EXCLUDED.tokens,
-				cents       = EXCLUDED.cents,
+				cost_micros = EXCLUDED.cost_micros,
 				error       = EXCLUDED.error`,
 			st.RunID, s.StepIndex, string(s.Kind), s.Name, s.NodeID, s.IdempotencyKey,
-			string(s.Status), s.Attempt, s.StartedAt, s.FinishedAt, s.Tokens, s.Cents, textOrNil(s.Error),
+			string(s.Status), s.Attempt, s.StartedAt, s.FinishedAt, s.Tokens, s.CostMicros, textOrNil(s.Error),
 		)
 	}
 	results := tx.SendBatch(ctx, batch)

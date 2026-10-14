@@ -47,7 +47,7 @@ func submit(t *testing.T, s *store.Store, agent string, version int) *journal.Ru
 		AgentVersion: version,
 		Input:        json.RawMessage(`{"q":"hello"}`),
 		BudgetTokens: 10000,
-		BudgetCents:  100,
+		BudgetMicros: 100,
 	})
 	if err != nil {
 		t.Fatalf("submit run: %v", err)
@@ -128,7 +128,7 @@ func TestLoadStateMatchesInMemoryState(t *testing.T) {
 			Payload: journal.ModelCallCompletedPayload{
 				Versioned: v(), StepIndex: 0, Model: "mock",
 				Response:     json.RawMessage(`{"text":"hi"}`),
-				PromptTokens: 11, CompletionTokens: 7, Cents: 2,
+				PromptTokens: 11, CompletionTokens: 7, CostMicros: 2,
 			}},
 		store.PendingEvent{Type: journal.TypeRunCompleted,
 			Payload: journal.RunCompletedPayload{Versioned: v(), Output: json.RawMessage(`{"ok":true}`)}},
@@ -147,8 +147,8 @@ func TestLoadStateMatchesInMemoryState(t *testing.T) {
 	if string(inMem) != string(fromLog) {
 		t.Errorf("state held by the writer diverged from the state folded from the log:\n writer: %s\n    log: %s", inMem, fromLog)
 	}
-	if loaded.TokensUsed != 18 || loaded.CentsUsed != 2 {
-		t.Errorf("accounting = %d tokens / %d cents, want 18/2", loaded.TokensUsed, loaded.CentsUsed)
+	if loaded.TokensUsed != 18 || loaded.MicrosUsed != 2 {
+		t.Errorf("accounting = %d tokens / %d micro-dollars, want 18/2", loaded.TokensUsed, loaded.MicrosUsed)
 	}
 }
 
@@ -298,7 +298,7 @@ func fullLifecycle(t *testing.T, s *store.Store, st *journal.RunState) {
 		{Type: journal.TypeModelCallCompleted, Payload: journal.ModelCallCompletedPayload{
 			Versioned: v(), StepIndex: 0, Attempt: 1, Model: "mock",
 			Response:     json.RawMessage(`{"tool":"web_fetch"}`),
-			PromptTokens: 40, CompletionTokens: 20, Cents: 4}},
+			PromptTokens: 40, CompletionTokens: 20, CostMicros: 4}},
 		{Type: journal.TypeStepScheduled, Payload: journal.StepScheduledPayload{
 			Versioned: v(), StepIndex: 1, Kind: journal.StepKindTool,
 			Name: "web_fetch", NodeID: "n1", IdempotencyKey: stepKey(t, st.RunID, 1, `{"url":"https://example.com"}`), RandSeed: 12}},
@@ -325,7 +325,7 @@ func TestRebuildRecomputesProjectionsFromLog(t *testing.T) {
 
 	// Corrupt the projection the way a bug in the append path would.
 	if _, err := s.Pool().Exec(ctx,
-		`UPDATE runs SET status = 'running', tokens_used = 0, cents_used = 0 WHERE id = $1`,
+		`UPDATE runs SET status = 'running', tokens_used = 0, micros_used = 0 WHERE id = $1`,
 		st.RunID); err != nil {
 		t.Fatalf("corrupt runs: %v", err)
 	}
@@ -359,14 +359,14 @@ func TestRebuildRecomputesProjectionsFromLog(t *testing.T) {
 
 	// And the rebuilt projection agrees with the fold on the details.
 	var status string
-	var tokens, cents int64
+	var tokens, micros int64
 	if err := s.Pool().QueryRow(ctx,
-		`SELECT status, tokens_used, cents_used FROM runs WHERE id = $1`, st.RunID,
-	).Scan(&status, &tokens, &cents); err != nil {
+		`SELECT status, tokens_used, micros_used FROM runs WHERE id = $1`, st.RunID,
+	).Scan(&status, &tokens, &micros); err != nil {
 		t.Fatalf("read rebuilt run: %v", err)
 	}
-	if status != "completed" || tokens != 60 || cents != 4 {
-		t.Errorf("rebuilt run = %s / %d tokens / %d cents, want completed/60/4", status, tokens, cents)
+	if status != "completed" || tokens != 60 || micros != 4 {
+		t.Errorf("rebuilt run = %s / %d tokens / %d micro-dollars, want completed/60/4", status, tokens, micros)
 	}
 
 	var attempt int
@@ -588,15 +588,15 @@ func snapshotProjection(t *testing.T, s *store.Store, runID uuid.UUID) string {
 	err := s.Pool().QueryRow(ctx, `
 		SELECT concat_ws('|',
 			r.tenant_id, r.agent_name, r.agent_version, r.status,
-			r.input::text, r.budget_tokens, r.budget_cents,
-			r.tokens_used, r.cents_used,
+			r.input::text, r.budget_tokens, r.budget_micros,
+			r.tokens_used, r.micros_used,
 			r.created_at, r.started_at, r.finished_at,
 			coalesce(r.terminal_output::text, ''), coalesce(r.error, ''),
 			coalesce(r.replay_of::text, ''),
 			(SELECT coalesce(string_agg(concat_ws(',',
 				s.step_index, s.kind, s.name, s.node_id, s.idempotency_key,
 				s.status, s.attempt, s.started_at, s.finished_at,
-				s.tokens, s.cents, coalesce(s.error, '')), ';' ORDER BY s.step_index), '')
+				s.tokens, s.cost_micros, coalesce(s.error, '')), ';' ORDER BY s.step_index), '')
 			 FROM steps s WHERE s.run_id = r.id)
 		)
 		FROM runs r WHERE r.id = $1`, runID).Scan(&out)

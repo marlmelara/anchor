@@ -32,7 +32,7 @@ partitioned log.
 
 ## Status
 
-Milestones 1 to 4 of 8 are complete. Runs are journaled, claimed from a
+Milestones 1 to 5 of 8 are complete. Runs are journaled, claimed from a
 `SKIP LOCKED` queue, and executed by a worker pool against a mock provider,
 with idempotency keys and retries. Workers that are `SIGKILL`ed lose no runs
 and duplicate no effects — proven by a chaos suite that kills real processes:
@@ -194,8 +194,8 @@ choice costs.
 | M2 | `anchor-server` REST API. `SKIP LOCKED` queue. Worker pool claiming and executing a two-node graph. Idempotency keys enforced. Retries with backoff. | **done** |
 | M3 | Lease expiry takeover and the reaper. Chaos script. Crash recovery proven. | **done** |
 | M4 | Docker sandbox executor with limits; tool schema validation; real LLM provider adapter. | **done** |
-| M5 | Budgets, Redis token-bucket rate limiting, circuit breaker, backpressure. Prometheus metrics. | next |
-| M6 | Deterministic replay end-to-end: `ReplaySource`, replay run type, divergence detection, fidelity report. | |
+| M5 | Budgets, Redis token-bucket rate limiting, circuit breaker, backpressure. Prometheus metrics. | **done** |
+| M6 | Deterministic replay end-to-end: `ReplaySource`, replay run type, divergence detection, fidelity report. | next |
 | M7 | Trace viewer. TypeScript SDK. | |
 | M8 | k6 load tests, chaos suite in CI, measured benchmarks, demo video. | |
 

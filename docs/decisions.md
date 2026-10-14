@@ -323,6 +323,126 @@ at claim time rather than at execution time.
 
 ---
 
+### Money is counted in micro-dollars
+
+**Chose:** `budget_micros` / `micros_used`, one millionth of a dollar.
+
+**Alternative:** integer cents, which is what the schema originally had.
+
+**Why:** a real call -- 36 input and 143 output tokens on Opus 5.5 -- costs
+about $0.003. In integer cents that is **zero**. A cost budget counted in cents
+therefore rounds almost every run to nothing and can never trigger, which is
+worse than having no budget at all: the operator believes they have one.
+
+Floating point is never used for money; this is integer arithmetic throughout.
+Prices are stored per *million* tokens so that models costing a fraction of a
+micro-dollar per token stay exact integers.
+
+**Cost:** a schema migration and a payload version bump. Cheap because both
+columns held only zeros; expensive the moment there is real data, which is the
+argument for doing it before anything depends on it. Integer division truncates,
+so a figure can be up to one micro-dollar below true cost per call -- a
+millionth of a dollar, preferable to float rounding across thousands of calls.
+
+---
+
+### Payload v2, with v1 still readable
+
+**Chose:** bump `CurrentPayloadVersion` to 2 and give the payloads accessor
+methods that convert v1's cent fields.
+
+**Alternative:** rewrite the old events, or keep the field name and change what
+it means.
+
+**Why:** rewriting is impossible -- `run_events` is append-only and the trigger
+rejects `UPDATE`. Reusing the name with a new meaning would make every old run
+fold to a figure 10,000x wrong, silently. The version field exists for exactly
+this, and this is the first time it has been used.
+
+**Cost:** every money-carrying payload now has two fields and an accessor, and
+both must be kept working forever. Event schemas are the one part of an
+event-sourced system that can never be deleted.
+
+---
+
+### An unpriced model is an error, not a zero
+
+**Chose:** `pricing.Cost` returns `ErrUnknownModel`. A run with a spending
+budget against an unpriced model is refused outright; without a budget it runs
+but records `cost_unknown`.
+
+**Alternative:** charge zero and carry on.
+
+**Why:** charging zero means the budget silently passes over that model. The
+operator believes a cap is in force while nothing counts against it -- the same
+failure the cents bug caused, re-created in a different place.
+
+**Cost:** adding a model means editing the table, and forgetting to breaks runs
+that set a spending budget. That friction is deliberate: the alternative fails
+silently, and this fails loudly.
+
+---
+
+### Rate limits fail closed; the circuit breaker fails open
+
+**Chose:** when Redis is unreachable, the token bucket denies and the breaker
+allows.
+
+**Why:** they are different kinds of thing. A rate limit is a **promise** to
+someone else's service -- flooding a provider during a Redis outage breaks it,
+so it fails closed. A breaker is an **optimisation** for us: it saves money on
+calls likely to fail, and a Redis outage must not halt all work, so it fails
+open. Budgets follow the limiter.
+
+**Cost:** a Redis outage stops all model calls, turning a cache dependency into
+a hard one for throughput. The alternative is overrunning a provider's limits
+during exactly the incident when that hurts most.
+
+---
+
+### A refused call parks the run rather than sleeping
+
+**Chose:** rate-limited and breaker-refused runs are requeued with a future
+`available_at`.
+
+**Alternative:** sleep in the worker until the bucket refills.
+
+**Why:** a sleeping goroutine holds a worker slot **and a lease** while doing
+nothing. The slot is unavailable to work that could proceed, and the lease can
+expire mid-sleep, letting another worker claim a run this one still believes it
+owns.
+
+**Cost:** a requeue is a database round trip, which for a very short wait costs
+more than the wait itself. Retries keep the in-place path for backoffs under a
+second.
+
+---
+
+### The breaker is consulted before the rate limit
+
+**Chose:** `Guards.Check` asks the breaker first.
+
+**Why:** a call refused by an open breaker should not also consume a rate-limit
+token. Spending a token on a call that will not be made throttles the tenant for
+no reason, and during a provider outage would exhaust every tenant's bucket
+without a single call being attempted.
+
+---
+
+### Fixed-cardinality metric series are pre-created
+
+**Chose:** `initFixedLabels` touches every known label combination at startup.
+
+**Why:** a Prometheus `*Vec` exposes nothing until a combination is first
+observed, so a "failed runs" panel reads *no data* rather than 0 -- which looks
+identical to a broken scrape, at exactly the moment someone is trying to tell
+them apart.
+
+**Cost:** only works for labels whose values are known in advance. Model and
+provider names are open sets, so those series still appear on first use.
+
+---
+
 ### Every worker runs the reaper
 
 **Chose:** the lease reaper is a goroutine inside every worker process.

@@ -7,13 +7,24 @@
 # worker on camera; the viewer stalls for the lease timeout, then another worker
 # picks the run up at the exact next step.
 #
-#   ./scripts/chaos.sh [runs] [workers] [seconds]
+#   ./scripts/chaos.sh [runs] [workers] [chaos-seconds]
 #
+# Everything happens in its own Postgres schema, so running this never destroys
+# whatever is in the development database.
 set -euo pipefail
 
 RUNS=${1:-40}
 WORKERS=${2:-3}
-DURATION=${3:-30}
+DURATION=${3:-20}
+SCHEMA=${ANCHOR_CHAOS_SCHEMA:-chaos_demo}
+
+# One run per goroutine at a time, so concurrency is WORKERS * POOL. These
+# defaults are chosen so the work OUTLASTS the chaos loop: with 3 workers x 1
+# goroutine and a 2s model call, 40 runs take roughly 40 * 2 / 3 = 27s against a
+# 20s kill loop. Get this wrong and the kills land on idle workers, nothing is
+# ever interrupted, and the demo shows a recovery that never happened.
+POOL=${ANCHOR_CHAOS_POOL:-1}
+LATENCY=${ANCHOR_CHAOS_LATENCY:-2s}
 
 DSN=${ANCHOR_DATABASE_URL:-postgres://anchor:anchor@localhost:5433/anchor?sslmode=disable}
 export ANCHOR_DATABASE_URL="$DSN"
@@ -21,45 +32,66 @@ export ANCHOR_DATABASE_URL="$DSN"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-BIN="$(mktemp -d)/anchor-worker"
+BIN_DIR="$(mktemp -d)"
+WORKER_BIN="$BIN_DIR/anchor-worker"
+CTL_BIN="$BIN_DIR/anchorctl"
 PIDS=()
 
 cleanup() {
+  # Kill by pid and do NOT call a bare `wait`. An unqualified wait blocks on
+  # every background job, so a single survivor hangs the script forever -- which
+  # is exactly what happened while the pid bug above was live.
   for pid in "${PIDS[@]:-}"; do
-    kill -9 "$pid" 2>/dev/null || true
+    [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null || true
   done
+  # Belt and braces: anything still wearing this run's schema label.
+  pkill -f "anchor-worker -id chaos-.* -schema $SCHEMA" 2>/dev/null || true
 }
-trap cleanup EXIT
+trap cleanup EXIT INT TERM
 
-psql_do() { docker exec -i anchor-postgres psql -qtAX -U anchor -d anchor -c "$1"; }
+# psql pinned to the demo schema via PGOPTIONS, so these queries can never read
+# or write the default schema by accident.
+psql_do() {
+  docker exec -e PGOPTIONS="-c search_path=$SCHEMA" -i anchor-postgres \
+    psql -qtAX -U anchor -d anchor -c "$1"
+}
 
-echo "==> building worker"
-go build -o "$BIN" ./cmd/anchor-worker
+echo "==> building binaries once"
+# Built, not `go run`: go run launches the binary as a CHILD, so $! would be the
+# wrapper's pid and kill -9 would leave the real worker running. It also saves a
+# process launch per submitted run.
+go build -o "$WORKER_BIN" ./cmd/anchor-worker
+go build -o "$CTL_BIN" ./cmd/anchorctl
 
-echo "==> applying migrations"
-go run ./cmd/anchorctl migrate >/dev/null
-
-echo "==> resetting demo state"
+echo "==> preparing schema '$SCHEMA'"
+docker exec -i anchor-postgres psql -qtAX -U anchor -d anchor \
+  -c "CREATE SCHEMA IF NOT EXISTS $SCHEMA" >/dev/null
+"$CTL_BIN" migrate -schema "$SCHEMA" >/dev/null
 psql_do "DROP TABLE IF EXISTS chaos_effects" >/dev/null
 psql_do "TRUNCATE queue, leases, steps, run_events, runs, agents RESTART IDENTITY CASCADE" >/dev/null
 
 echo "==> registering the chaos agent"
-cat > /tmp/anchor-chaos-graph.json <<'JSON'
+cat > "$BIN_DIR/graph.json" <<'JSON'
 {"agent":"chaos","v":1,"nodes":[
   {"id":"n1","type":"model_call","model":"mock","prompt":"think about {{input.marker}}"},
   {"id":"n2","type":"tool_call","tool":"chaos_count","input":{"marker":"{{input.marker}}"}}
 ]}
 JSON
-go run ./cmd/anchorctl agent-register -name chaos -file /tmp/anchor-chaos-graph.json
+"$CTL_BIN" agent-register -schema "$SCHEMA" -name chaos -file "$BIN_DIR/graph.json"
 
 echo "==> submitting $RUNS runs"
 for i in $(seq 1 "$RUNS"); do
-  go run ./cmd/anchorctl submit -agent chaos -input "{\"marker\":\"run-$i\"}" >/dev/null
+  "$CTL_BIN" submit -schema "$SCHEMA" -agent chaos -input "{\"marker\":\"run-$i\"}" >/dev/null
 done
 
 start_worker() {
-  "$BIN" -id "chaos-$1" -pool 2 -lease 2s -heartbeat 700ms \
-         -reap 500ms -mock-latency 400ms -chaos-tools 2>&1 | sed "s/^/[worker-$1] /" &
+  # Process substitution, NOT a pipeline. In `cmd | sed &` the shell sets $! to
+  # the LAST command in the pipeline -- sed -- so kill -9 would take out the log
+  # filter and leave the worker running. With `> >(sed ...)` the worker itself is
+  # the backgrounded command, so $! is the pid we actually need to kill.
+  "$WORKER_BIN" -id "chaos-$1" -pool "$POOL" -lease 2s -heartbeat 700ms \
+    -reap 500ms -mock-latency "$LATENCY" -chaos-tools -schema "$SCHEMA" \
+    > >(sed "s/^/[worker-$1] /") 2>&1 &
   PIDS[$1]=$!
 }
 
@@ -85,7 +117,7 @@ done
 
 echo
 echo "==> chaos over after $KILLS kills; waiting for the remaining runs"
-for _ in $(seq 1 60); do
+for _ in $(seq 1 90); do
   done_count=$(psql_do "SELECT count(*) FROM runs WHERE status = 'completed'")
   [ "$done_count" -eq "$RUNS" ] && break
   sleep 1
@@ -108,7 +140,16 @@ echo "────────────────────────�
 STATUS=0
 [ "$COMPLETED" -eq "$RUNS" ] || { echo "  FAIL: runs were lost"; STATUS=1; }
 [ "$EFFECTS" -eq "$RUNS" ]   || { echo "  FAIL: $EFFECTS effects for $RUNS runs (duplicates)"; STATUS=1; }
-[ "$RESUMED" -gt 0 ]         || { echo "  WARN: no run was resumed; chaos never interrupted one"; }
+[ "$DISTINCT" -eq "$RUNS" ]  || { echo "  FAIL: only $DISTINCT of $RUNS markers fired"; STATUS=1; }
+# A green run that never interrupted anything proves nothing. The whole claim is
+# that a killed worker's run is picked up and finished, so no resumption means
+# the demo failed to demonstrate its own point.
+if [ "$KILLS" -gt 0 ] && [ "$RESUMED" -eq 0 ]; then
+  echo "  FAIL: $KILLS kills but no run was resumed -- the chaos never interrupted one."
+  echo "        The work finished before the kill loop could bite. Raise the run"
+  echo "        count or ANCHOR_CHAOS_LATENCY so work outlasts the chaos."
+  STATUS=1
+fi
 
 if [ "$STATUS" -eq 0 ]; then
   echo "  PASS: no runs lost, zero duplicate effects under $KILLS kills"
@@ -116,6 +157,6 @@ fi
 
 echo
 echo "==> verifying projections still match the event log"
-go run ./cmd/anchorctl rebuild -verify
+"$CTL_BIN" rebuild -schema "$SCHEMA" -verify
 
 exit "$STATUS"

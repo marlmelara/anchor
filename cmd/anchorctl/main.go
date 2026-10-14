@@ -79,6 +79,15 @@ func run() error {
 	}
 }
 
+// schemaFlag is set by every subcommand so operator commands can be pointed at
+// a non-default search_path -- the chaos demo runs in its own schema so it
+// never destroys whatever is in the development database.
+var schemaFlag string
+
+func addSchemaFlag(fs *flag.FlagSet) {
+	fs.StringVar(&schemaFlag, "schema", "", "postgres search_path (default: public)")
+}
+
 // openStore resolves the DSN and connects.
 func openStore(ctx context.Context, dsn string) (*store.Store, error) {
 	if dsn == "" {
@@ -89,12 +98,13 @@ func openStore(ctx context.Context, dsn string) (*store.Store, error) {
 	}
 	connectCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	return store.Open(connectCtx, store.Config{DSN: dsn, MaxConns: 8})
+	return store.Open(connectCtx, store.Config{DSN: dsn, MaxConns: 8, Schema: schemaFlag})
 }
 
 func cmdMigrate(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("migrate", flag.ExitOnError)
 	dsn := fs.String("dsn", "", "postgres DSN")
+	addSchemaFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -121,6 +131,7 @@ func cmdMigrate(ctx context.Context, args []string) error {
 func cmdRebuild(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("rebuild", flag.ExitOnError)
 	dsn := fs.String("dsn", "", "postgres DSN")
+	addSchemaFlag(fs)
 	runID := fs.String("run", "", "rebuild only this run id (default: every run)")
 	verify := fs.Bool("verify", false, "report differences instead of rewriting the projections")
 	if err := fs.Parse(args); err != nil {
@@ -169,6 +180,7 @@ func cmdRebuild(ctx context.Context, args []string) error {
 func cmdAgentRegister(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("agent-register", flag.ExitOnError)
 	dsn := fs.String("dsn", "", "postgres DSN")
+	addSchemaFlag(fs)
 	name := fs.String("name", "", "agent name")
 	file := fs.String("file", "", "path to the agent definition JSON")
 	if err := fs.Parse(args); err != nil {
@@ -198,6 +210,7 @@ func cmdAgentRegister(ctx context.Context, args []string) error {
 func cmdSubmit(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("submit", flag.ExitOnError)
 	dsn := fs.String("dsn", "", "postgres DSN")
+	addSchemaFlag(fs)
 	tenant := fs.String("tenant", "default", "tenant id")
 	agent := fs.String("agent", "", "agent name")
 	version := fs.Int("agent-version", 0, "agent version (default: latest)")
@@ -242,6 +255,7 @@ func cmdSubmit(ctx context.Context, args []string) error {
 func cmdShow(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("show", flag.ExitOnError)
 	dsn := fs.String("dsn", "", "postgres DSN")
+	addSchemaFlag(fs)
 	runID := fs.String("run", "", "run id")
 	if err := fs.Parse(args); err != nil {
 		return err

@@ -1,0 +1,10 @@
+ALTER TABLE runs   DROP CONSTRAINT IF EXISTS runs_replay_of_fkey;
+ALTER TABLE runs   ADD  CONSTRAINT runs_replay_of_fkey FOREIGN KEY (replay_of) REFERENCES runs (id);
+ALTER TABLE queue  ADD  CONSTRAINT queue_run_id_fkey  FOREIGN KEY (run_id) REFERENCES runs (id);
+ALTER TABLE leases ADD  CONSTRAINT leases_run_id_fkey FOREIGN KEY (run_id) REFERENCES runs (id);
+ALTER TABLE steps  DROP CONSTRAINT IF EXISTS steps_run_id_fkey;
+ALTER TABLE steps  ADD  CONSTRAINT steps_run_id_fkey  FOREIGN KEY (run_id) REFERENCES runs (id);
+ALTER TABLE agents RENAME COLUMN graph TO definition;
+ALTER TABLE run_events DROP CONSTRAINT IF EXISTS run_events_seq_positive;
+ALTER TABLE run_events ADD  CONSTRAINT run_events_seq_positive CHECK (seq >= 0);
+ALTER TABLE run_events ADD  CONSTRAINT run_events_run_id_fkey FOREIGN KEY (run_id) REFERENCES runs (id);

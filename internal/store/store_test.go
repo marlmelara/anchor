@@ -101,8 +101,8 @@ func TestSubmitRunWritesEventAndEnqueuesAtomically(t *testing.T) {
 	if st.Status != journal.RunStatusPending {
 		t.Errorf("status = %q, want pending", st.Status)
 	}
-	if st.NextSeq != 1 {
-		t.Errorf("NextSeq = %d, want 1", st.NextSeq)
+	if st.NextSeq != journal.FirstSeq+1 {
+		t.Errorf("NextSeq = %d, want %d", st.NextSeq, journal.FirstSeq+1)
 	}
 
 	// The run is in the log...
@@ -110,7 +110,7 @@ func TestSubmitRunWritesEventAndEnqueuesAtomically(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load events: %v", err)
 	}
-	if len(events) != 1 || events[0].Type != journal.TypeRunSubmitted || events[0].Seq != 0 {
+	if len(events) != 1 || events[0].Type != journal.TypeRunSubmitted || events[0].Seq != journal.FirstSeq {
 		t.Fatalf("unexpected log: %+v", events)
 	}
 
@@ -208,8 +208,9 @@ func TestConcurrentAppendLosesOnSeqConflict(t *testing.T) {
 	}
 
 	// The loser's state is untouched, so it can safely release and move on.
-	if workerB.NextSeq != 1 {
-		t.Errorf("loser's NextSeq = %d, want 1 (state must not advance on a failed append)", workerB.NextSeq)
+	if workerB.NextSeq != journal.FirstSeq+1 {
+		t.Errorf("loser's NextSeq = %d, want %d (state must not advance on a failed append)",
+			workerB.NextSeq, journal.FirstSeq+1)
 	}
 
 	// Exactly one RunStarted landed.
@@ -551,5 +552,92 @@ func TestEventTimestampsSurviveTheRoundTrip(t *testing.T) {
 	fromLog, _ := json.Marshal(loaded)
 	if string(inMem) != string(fromLog) {
 		t.Errorf("writer state diverged from the folded log:\n writer: %s\n    log: %s", inMem, fromLog)
+	}
+}
+
+// The M1 acceptance criterion, exactly as the build spec words it: "dropping
+// runs and steps and running rebuild reproduces them exactly."
+//
+// Deleting the runs row -- not just overwriting it -- is the whole point. An
+// upsert would hide the failure this proves against: a column the fold stopped
+// writing would keep its stale value forever and nobody would notice.
+func TestRebuildReproducesProjectionsAfterDroppingThem(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	version := seedAgent(t, s, "research")
+	st := submit(t, s, "research", version)
+	fullLifecycle(t, s, st)
+
+	before := snapshotProjection(t, s, st.RunID)
+
+	// Drop both projections outright. This is only possible because run_events
+	// has no foreign key to runs: the log does not depend on its own cache.
+	if _, err := s.Pool().Exec(ctx, `DELETE FROM steps WHERE run_id = $1`, st.RunID); err != nil {
+		t.Fatalf("drop steps: %v", err)
+	}
+	if _, err := s.Pool().Exec(ctx, `DELETE FROM runs WHERE id = $1`, st.RunID); err != nil {
+		t.Fatalf("drop run: %v", err)
+	}
+
+	var gone int
+	if err := s.Pool().QueryRow(ctx,
+		`SELECT count(*) FROM runs WHERE id = $1`, st.RunID).Scan(&gone); err != nil {
+		t.Fatalf("count runs: %v", err)
+	}
+	if gone != 0 {
+		t.Fatalf("test setup: the runs row was not actually dropped")
+	}
+
+	// The log alone must be enough to put both back.
+	if _, err := s.RebuildRun(ctx, st.RunID, false); err != nil {
+		t.Fatalf("rebuild: %v", err)
+	}
+
+	after := snapshotProjection(t, s, st.RunID)
+	if before != after {
+		t.Errorf("rebuild did not reproduce the projection exactly:\n before: %s\n  after: %s", before, after)
+	}
+}
+
+// snapshotProjection renders every projected column this milestone writes, so
+// the comparison is over values rather than over a handful of spot checks.
+func snapshotProjection(t *testing.T, s *store.Store, runID uuid.UUID) string {
+	t.Helper()
+	ctx := context.Background()
+
+	var out string
+	err := s.Pool().QueryRow(ctx, `
+		SELECT concat_ws('|',
+			r.tenant_id, r.agent_name, r.agent_version, r.status,
+			r.input::text, r.budget_tokens, r.budget_cents,
+			r.tokens_used, r.cents_used,
+			r.created_at, r.started_at, r.finished_at,
+			coalesce(r.terminal_output::text, ''), coalesce(r.error, ''),
+			coalesce(r.replay_of::text, ''),
+			(SELECT coalesce(string_agg(concat_ws(',',
+				s.step_index, s.kind, s.name, s.node_id, s.idempotency_key,
+				s.status, s.attempt, s.started_at, s.finished_at,
+				s.tokens, s.cents, coalesce(s.error, '')), ';' ORDER BY s.step_index), '')
+			 FROM steps s WHERE s.run_id = r.id)
+		)
+		FROM runs r WHERE r.id = $1`, runID).Scan(&out)
+	if err != nil {
+		t.Fatalf("snapshot projection: %v", err)
+	}
+	return out
+}
+
+// Agent graphs are versioned and immutable, which is what lets a replay walk
+// the graph the run originally ran.
+func TestAgentGraphColumnIsNamedGraph(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	var col string
+	err := s.Pool().QueryRow(ctx, `
+		SELECT column_name FROM information_schema.columns
+		WHERE table_name = 'agents' AND column_name = 'graph'`).Scan(&col)
+	if err != nil {
+		t.Fatalf("agents.graph column is missing (build spec names it graph): %v", err)
 	}
 }

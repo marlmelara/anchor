@@ -14,12 +14,12 @@ import (
 // Versions are append-only. A run pins the version it was submitted against, so
 // replaying a run from last month walks the graph as it was last month, not as
 // it is today. This is the reason agents are data rather than code.
-func (s *Store) RegisterAgent(ctx context.Context, name string, definition json.RawMessage) (int, error) {
+func (s *Store) RegisterAgent(ctx context.Context, name string, graph json.RawMessage) (int, error) {
 	if name == "" {
 		return 0, errors.New("agent name is required")
 	}
-	if !json.Valid(definition) {
-		return 0, errors.New("agent definition is not valid JSON")
+	if !json.Valid(graph) {
+		return 0, errors.New("agent graph is not valid JSON")
 	}
 
 	// Two registrations of the same agent can compute the same next version and
@@ -30,9 +30,9 @@ func (s *Store) RegisterAgent(ctx context.Context, name string, definition json.
 	for range attempts {
 		var version int
 		err := s.pool.QueryRow(ctx, `
-			INSERT INTO agents (name, version, definition)
+			INSERT INTO agents (name, version, graph)
 			SELECT $1, COALESCE(MAX(version), 0) + 1, $2 FROM agents WHERE name = $1
-			RETURNING version`, name, []byte(definition)).Scan(&version)
+			RETURNING version`, name, []byte(graph)).Scan(&version)
 		if err == nil {
 			return version, nil
 		}
@@ -48,7 +48,7 @@ func (s *Store) RegisterAgent(ctx context.Context, name string, definition json.
 func (s *Store) GetAgent(ctx context.Context, name string, version int) (json.RawMessage, error) {
 	var raw []byte
 	err := s.pool.QueryRow(ctx,
-		`SELECT definition FROM agents WHERE name = $1 AND version = $2`,
+		`SELECT graph FROM agents WHERE name = $1 AND version = $2`,
 		name, version).Scan(&raw)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("agent %s v%d: %w", name, version, ErrNotFound)

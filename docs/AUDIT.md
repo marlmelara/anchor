@@ -104,6 +104,38 @@ because the step index came from `len(st.Steps)` rather than a walk cursor. It
 passed every single-worker test and only appeared under chaos. See the Struggles
 section of `docs/learning/M3-leases-crash-recovery.md`.
 
+---
+
+## M4 — Sandbox and real provider
+
+| # | Criterion | Status | Evidence |
+|---|---|---|---|
+| 1 | A tool that tries to use 1 GB of memory is killed | **pass** | `TestSandboxKillsAToolThatExceedsItsMemoryCap` — real container, 64 MB cap, `dd bs=1G`, killed with exit 137 |
+| 2 | A tool that tries network access without declaring it fails | **pass** | `TestSandboxDeniesNetworkToAToolThatDidNotDeclareEgress`, plus `TestSandboxDeniesEgressWhenTheDeploymentForbidsIt` for the second gate |
+| 3 | No containers remain after the chaos loop | **pass** | `TestSandboxLeavesNoContainersBehind` (5 calls including a timeout and an OOM) and `TestReapOrphansRemovesLeftoverContainers` |
+| 4 | One real end-to-end run against the Anthropic API succeeds | **NOT VERIFIED** | `scripts/live-check.sh` is written and `make live-check` runs it, but it needs a real credential and spends money, so it has not been executed. **Marlon must run this himself before claiming M4 complete.** |
+
+Also covered: read-only root filesystem, non-root user, wall-clock timeout, and
+schema validation of both tool input (before a container starts) and output.
+
+Provider behaviour is tested against a local server speaking the Anthropic wire
+format: message/tool mapping, raw-body capture, retryable vs terminal status
+classification, connection failures, and refusal handling.
+
+**Model ids.** The build spec's example graphs use `claude-sonnet-4-6`, which
+predates the current generation. Current ids are `claude-opus-5-5` (default),
+`claude-sonnet-5-5`, `claude-haiku-5-5`. The adapter does not default a model —
+the graph supplies it — so nothing is hardcoded, but the README and
+`live-check.sh` use current ids.
+
+**Known gap, deferred to M6/M7.** Anchor rebuilds the message array for each
+`agent_loop` turn from its own state rather than echoing the provider's content
+blocks back verbatim. Current models bind reasoning blocks to the conversation
+that produced them, so a multi-turn loop against a real provider discards them.
+Single `model_call` nodes are unaffected. Fixing it means journaling the
+assistant content blocks and replaying them unchanged — which M6's replay source
+needs anyway.
+
 ### Process deliverables added
 
 - `docs/learning/M1-journal-fold-rebuild.md` — the learning entry

@@ -341,6 +341,97 @@ to move behind an advisory lock.
 
 ---
 
+### Docker containers for tool sandboxing
+
+**Chose:** one short-lived Docker container per tool call.
+
+**Alternative:** gVisor or Firecracker microVMs, WebAssembly, or running tools
+in-process.
+
+**Why:** Docker is everywhere, well understood, and good enough for the actual
+threat — a buggy tool, or a tool the model misuses. In-process is not a sandbox
+at all; a tool could read the worker's memory, including other tenants' data.
+
+**Cost:** containers share the host kernel, so this does **not** stop a
+determined attacker with a container-escape exploit. Stronger isolation means
+microVMs or separate hosts. It also adds container startup latency to every tool
+call, which is real but small next to a model call.
+
+Stating the limit is the point. "It sandboxes tools" invites the follow-up "so
+it is safe to run hostile code?", and the honest answer is no.
+
+---
+
+### Default-deny networking, behind two gates
+
+**Chose:** `--network none` unless the tool declares `egress: true` **and** the
+deployment sets `AllowEgress`.
+
+**Alternative:** allow network by default and let tools opt out, or trust the
+tool's declaration alone.
+
+**Why:** a tool that forgets to declare egress should fail loudly, not silently
+gain access to everything the worker can reach — including the database and any
+cloud metadata endpoint. The second gate exists because tool definitions are not
+all written by the operator: a deployment needs to be able to refuse network
+access fleet-wide regardless of what individual tools ask for.
+
+**Cost:** a legitimate tool that needs the network fails until someone changes
+two settings. That friction is the feature.
+
+---
+
+### Schema validation wraps the Runner
+
+**Chose:** `ValidatingRunner` wraps whichever runner is in use.
+
+**Alternative:** validate inside each Runner, or in the interpreter.
+
+**Why:** the Docker sandbox and the mock then behave identically, and the rule
+is written once. Putting it in the interpreter would mean the rule only applies
+where the interpreter remembers to apply it.
+
+**Cost:** one more layer between the worker and the tool. A tool with no
+declared schema still validates trivially — a deliberate escape hatch, and the
+cost is that such a tool's output is trusted.
+
+---
+
+### The official Anthropic SDK, not hand-rolled HTTP
+
+**Chose:** `github.com/anthropics/anthropic-sdk-go`.
+
+**Alternative:** `net/http` directly, which is what the build spec's teaching
+snippet shows.
+
+**Why:** the wire format changes, and an SDK tracks it. It also brings typed
+errors, which is what makes retryable/terminal classification a type check
+rather than string matching.
+
+**Cost:** a substantial dependency, and the typed response has to be unwrapped
+to get the raw body back for the journal (`msg.RawJSON()`). The raw body is
+non-negotiable: a replay returns it in place of calling the provider, so
+anything the adapter drops is lost to every future replay of that run.
+
+---
+
+### The real-API check is a script, not a test
+
+**Chose:** `scripts/live-check.sh`, run deliberately.
+
+**Alternative:** a test gated on `ANTHROPIC_API_KEY`.
+
+**Why:** it spends real money and needs a credential. CI has to be runnable by
+anyone on any branch without either, and a test that silently skips in CI
+reports a green build for something never verified.
+
+**Cost:** the real API is not exercised automatically, so a wire-format change
+would be caught at the next manual run rather than by the next push. The local
+wire-format tests cover everything Anchor owns; what the script adds is
+confirmation that the real API agrees.
+
+---
+
 ### Chaos tests spawn real processes and send real SIGKILL
 
 **Chose:** the chaos suite builds the worker binary, runs it as subprocesses,

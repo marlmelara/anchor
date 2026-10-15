@@ -107,6 +107,14 @@ milestone where it first appears, so revision can be scoped to what is built.
 | Tailwind | Utility CSS classes, each applying one small style rule | All styling | M7 |
 | `"use client"` | The directive marking a module as a Client Component | Interactive components | M7 |
 
+| Bucket upper bound | A histogram quantile is the top of a bucket, so an upper bound | Every quantile reported | M8 |
+| Closed vs open model | Fixed users that wait, versus a fixed send rate | Load test executor | M8 |
+| Constant arrival rate | Sending at a fixed rate regardless of response speed | k6 scenario | M8 |
+| Drain time | How long the queue takes to empty after load stops | Saturation measure | M8 |
+| k6 | A load-testing tool whose tests are written in JavaScript | `loadtest/` | M8 |
+| Saturation point | The load above which the queue grows faster than it drains | 400/s run | M8 |
+| Virtual user | One simulated client in a load test | k6 | M8 |
+
 ## Go terms
 
 | Term | Plain-English meaning | Python equivalent | M |

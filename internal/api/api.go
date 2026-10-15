@@ -75,6 +75,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /v1/runs/{id}", s.auth(s.handleGetRun))
 	mux.HandleFunc("GET /v1/runs/{id}/events", s.auth(s.handleRunEvents))
 	mux.HandleFunc("POST /v1/runs/{id}/cancel", s.auth(s.handleCancelRun))
+	mux.HandleFunc("GET /v1/runs/{id}/stream", s.auth(s.handleStreamRun))
+	mux.HandleFunc("POST /v1/runs/{id}/replay", s.auth(s.handleReplayRun))
 	return mux
 }
 
@@ -424,3 +426,42 @@ const (
 	WriteTimeout      = 60 * time.Second
 	IdleTimeout       = 120 * time.Second
 )
+
+// handleReplayRun submits a replay of an existing run.
+//
+// Returns the NEW run's id. The viewer then streams that run and diffs its
+// events against the original -- the replay is a run like any other, so the
+// same stream endpoint serves it.
+func (s *Server) handleReplayRun(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathUUID(w, r)
+	if !ok {
+		return
+	}
+	original, err := s.store.LoadState(r.Context(), id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "no such run")
+		return
+	}
+	if err != nil {
+		s.log.Error("replay: load run", "run", id, "err", err)
+		writeError(w, http.StatusInternalServerError, "could not load run")
+		return
+	}
+	if original.TenantID != tenantFrom(r.Context()) {
+		writeError(w, http.StatusNotFound, "no such run")
+		return
+	}
+
+	replayState, err := s.store.SubmitReplay(r.Context(), id)
+	if err != nil {
+		// Refusing an unfinished run or a replay-of-a-replay is a client
+		// mistake, not a server fault.
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"id":        replayState.RunID,
+		"replay_of": id,
+		"status":    replayState.Status,
+	})
+}

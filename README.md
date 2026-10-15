@@ -30,6 +30,31 @@ partitioned log.
 
 ---
 
+## What it looks like
+
+The trace viewer ships with the runtime (`make viewer-dev`). It reads the event
+log over SSE, so a running agent's timeline fills in live.
+
+**Replay.** Any completed run can be re-executed against its recorded model and
+tool responses. Anchor diffs the two event sequences position by position; an
+identical sequence is the determinism guarantee holding, and a divergence shows
+up as the first row where the two columns disagree.
+
+![The trace viewer replaying a completed run and diffing it against the original event sequence](docs/images/replay-diff.png)
+
+**The event log.** `runs` and `steps` are projections folded from an append-only
+`run_events` table. The log is the source of truth, and a database trigger
+rejects any `UPDATE` or `DELETE` against it.
+
+![A run's numbered event timeline, from RunSubmitted through RunCompleted](docs/images/run-timeline.png)
+
+**Run list.** Token counts and dollar costs come off that same fold, not a
+side-channel counter.
+
+![The run list, showing status, tokens and cost per run](docs/images/runs-list.png)
+
+---
+
 ## Status
 
 All eight milestones are complete. Runs are journaled, claimed from a

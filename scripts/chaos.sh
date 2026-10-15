@@ -51,10 +51,21 @@ trap cleanup EXIT INT TERM
 
 # psql pinned to the demo schema via PGOPTIONS, so these queries can never read
 # or write the default schema by accident.
-psql_do() {
-  docker exec -e PGOPTIONS="-c search_path=$SCHEMA" -i anchor-postgres \
-    psql -qtAX -U anchor -d anchor -c "$1"
-}
+#
+# Two ways to reach Postgres, because this runs in two places. Locally it is a
+# docker compose container; in CI it is a GitHub Actions service with no
+# container name to exec into, but psql is on PATH. Preferring a direct psql
+# when one exists covers both without the caller choosing.
+if command -v psql >/dev/null 2>&1; then
+  psql_do() { PGOPTIONS="-c search_path=$SCHEMA" psql -qtAX "$DSN" -c "$1"; }
+  psql_raw() { psql -qtAX "$DSN" -c "$1"; }
+else
+  psql_do() {
+    docker exec -e PGOPTIONS="-c search_path=$SCHEMA" -i anchor-postgres \
+      psql -qtAX -U anchor -d anchor -c "$1"
+  }
+  psql_raw() { docker exec -i anchor-postgres psql -qtAX -U anchor -d anchor -c "$1"; }
+fi
 
 echo "==> building binaries once"
 # Built, not `go run`: go run launches the binary as a CHILD, so $! would be the
@@ -64,8 +75,7 @@ go build -o "$WORKER_BIN" ./cmd/anchor-worker
 go build -o "$CTL_BIN" ./cmd/anchorctl
 
 echo "==> preparing schema '$SCHEMA'"
-docker exec -i anchor-postgres psql -qtAX -U anchor -d anchor \
-  -c "CREATE SCHEMA IF NOT EXISTS $SCHEMA" >/dev/null
+psql_raw "CREATE SCHEMA IF NOT EXISTS $SCHEMA" >/dev/null
 "$CTL_BIN" migrate -schema "$SCHEMA" >/dev/null
 psql_do "DROP TABLE IF EXISTS chaos_effects" >/dev/null
 psql_do "DROP TABLE IF EXISTS chaos_attempts" >/dev/null

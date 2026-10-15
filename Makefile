@@ -8,7 +8,7 @@ REDIS ?= redis://localhost:6380/0
 export ANCHOR_DATABASE_URL := $(DSN)
 export ANCHOR_REDIS_URL := $(REDIS)
 
-.PHONY: help up down reset-db migrate chaos live-check sdk viewer viewer-dev test test-unit test-race lint tidy-check ci fmt vet build clean rebuild verify psql redis-cli cover
+.PHONY: help up down reset-db migrate chaos live-check bench sdk viewer viewer-dev test test-unit test-race lint tidy-check ci fmt vet build clean rebuild verify psql redis-cli cover
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
@@ -63,6 +63,9 @@ viewer: ## Typecheck and build the trace viewer
 
 viewer-dev: ## Run the trace viewer against a local anchor-server
 	cd trace-viewer && ANCHOR_URL=$${ANCHOR_URL:-http://localhost:8080} npx next dev
+
+bench: up migrate ## Run the benchmark sweep and print figures for docs/NUMBERS.md
+	./scripts/bench.sh
 
 cover: up migrate ## Report test coverage
 	ANCHOR_TEST_DATABASE_URL="$(DSN)" go test ./... -coverprofile=coverage.out

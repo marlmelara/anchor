@@ -32,7 +32,7 @@ partitioned log.
 
 ## Status
 
-Milestones 1 to 7 of 8 are complete. Runs are journaled, claimed from a
+All eight milestones are complete. Runs are journaled, claimed from a
 `SKIP LOCKED` queue, and executed by a worker pool against a mock provider,
 with idempotency keys and retries. Workers that are `SIGKILL`ed lose no runs
 and duplicate no effects — proven by a chaos suite that kills real processes:
@@ -49,7 +49,12 @@ make live-check          # one real run against the Anthropic API
 make chaos               # kill workers, prove no runs are lost
 go run ./cmd/anchorctl fidelity   # replay a corpus and report fidelity
 make viewer-dev          # the trace viewer at localhost:3000
+make bench               # the benchmark sweep
 ```
+
+**The demo to watch first** is the crash demo: kill a worker on camera and
+watch another pick the run up at the exact next step. Script in
+[`docs/DEMO.md`](docs/DEMO.md).
 
 See [Milestones](#milestones).
 
@@ -200,25 +205,44 @@ choice costs.
 | M5 | Budgets, Redis token-bucket rate limiting, circuit breaker, backpressure. Prometheus metrics. | **done** |
 | M6 | Deterministic replay end-to-end: `ReplaySource`, replay run type, divergence detection, fidelity report. | **done** |
 | M7 | Trace viewer. TypeScript SDK. | **done** |
-| M8 | k6 load tests, chaos suite in CI, measured benchmarks, demo video. | next |
+| M8 | k6 load tests, chaos suite in CI, measured benchmarks, demo video. | **done** |
 
 ---
 
 ## Benchmarks
 
-Measured against a mock provider with fixed latency, so the numbers describe
-Anchor rather than the LLM. Hardware and methodology will be stated here
-alongside the results.
+Measured on an Apple M2 laptop, 8 cores, against a **mock provider at fixed
+latency** so the figures describe Anchor rather than a model. Full methodology,
+commands and honesty notes in [`docs/NUMBERS.md`](docs/NUMBERS.md).
 
-| Measurement | Result |
+```bash
+make bench        # reproduce these
+```
+
+| Measurement | Steady (50/s) | Saturated (400/s) |
+|---|---|---|
+| Runs submitted / completed | 1501 / **1501** | 7968 / **7968** |
+| Throughput | 100 steps/sec | **199 steps/sec** |
+| Scheduling latency (claim → first step) | p99 **50 ms** | p99 **50 ms** |
+| Queue wait (submit → claim) | p99 250 ms | p50 **30 s** |
+| Drain after load stopped | 0 s | 60 s |
+
+At **eight times** the sustainable rate nothing is lost — the system queues.
+And the two latencies move completely differently: scheduling latency is flat,
+queue wait explodes. Everything that backs up, backs up *before* the claim,
+which is why they are separate metrics. One averaged "latency" number would
+have hidden both facts.
+
+| Durability | Result |
 |---|---|
-| Throughput (steps/sec at W workers) | pending M8 |
-| p99 scheduling latency (claim → start) | pending M8 |
-| Recovery time after worker kill | bounded by lease duration; measured in M8 |
-| Replay fidelity over ≥200 runs | **100%** over 200 runs of mixed shapes (`anchorctl fidelity`) |
-| Duplicate effects under fault injection | **zero**, over 60 runs and 8+ worker kills (`make chaos`) |
+| Duplicate effects under fault injection | **zero** (7+ `SIGKILL`s, 5 resumptions) |
+| Runs lost under fault injection | **zero** |
+| Runs stranded by a rolling restart | **zero** |
+| Replay fidelity | **100%** over 200 runs |
 
----
+Quantiles are Prometheus bucket upper bounds, the hardware is a laptop running
+everything at once, and both caveats are stated in `NUMBERS.md` rather than
+left for the reader to discover.
 
 ## Scope
 

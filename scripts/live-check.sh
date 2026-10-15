@@ -60,8 +60,12 @@ RID=$(echo "$OUT" | awk '{print $3}')
 
 echo "==> waiting for the run to finish"
 for _ in $(seq 1 60); do
-  STATUS=$(docker exec -i anchor-postgres psql -qtAX -U anchor -d anchor \
-    -c "SELECT status FROM runs WHERE id = '$RID'")
+  if command -v psql >/dev/null 2>&1; then
+    STATUS=$(psql -qtAX "$DSN" -c "SELECT status FROM runs WHERE id = '$RID'")
+  else
+    STATUS=$(docker exec -i anchor-postgres psql -qtAX -U anchor -d anchor \
+      -c "SELECT status FROM runs WHERE id = '$RID'")
+  fi
   case "$STATUS" in
     completed|failed|cancelled|needs_review) break ;;
   esac

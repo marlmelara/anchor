@@ -323,6 +323,81 @@ at claim time rather than at execution time.
 
 ---
 
+### A constant arrival rate, not fixed virtual users
+
+**Chose:** k6's `constant-arrival-rate` executor.
+
+**Alternative:** a fixed pool of virtual users, which is the more common shape.
+
+**Why:** with fixed VUs each one waits for its response before sending again, so
+a slowing server automatically slows the load. The test backs off at exactly the
+moment the system is struggling and the measurement flatters it -- and the
+saturation point can never be found, because the test refuses to push past it.
+An arrival rate keeps sending regardless, which is what real traffic does.
+
+**Cost:** an open model can overwhelm the load generator itself if the rate is
+set far above what the system can take, so k6's own numbers need sanity checking
+at extreme rates.
+
+---
+
+### Benchmarks run against the mock provider only
+
+**Chose:** every figure in `NUMBERS.md` uses the mock at a fixed latency.
+
+**Why:** against a real provider the numbers would mostly be Anthropic's
+response time, which says nothing about this system and cannot be reproduced.
+The mock makes the measurement about queueing, claiming, journaling and
+projection cost -- the parts Anchor is responsible for.
+
+**Cost:** nothing here measures real-world end-to-end latency, which is what a
+user actually experiences. That figure is dominated by the model and belongs in
+a different table.
+
+---
+
+### Quantiles come from the worker's metrics, not from k6
+
+**Chose:** scheduling latency and step duration are read from the worker's
+Prometheus histograms; k6 reports only submission latency.
+
+**Why:** k6 cannot see them. It gets a 202 the moment a run is queued, and
+everything interesting -- the wait, the claim, the execution -- happens after
+that. Using k6's numbers would measure the write path and call it the system.
+
+**Cost:** two sources to reconcile, and a Prometheus quantile is a bucket upper
+bound rather than a point estimate. Stated explicitly in `NUMBERS.md` rather
+than presented as precision it does not have.
+
+---
+
+### The chaos script and a fidelity sweep run in CI
+
+**Chose:** CI runs `scripts/chaos.sh` and `anchorctl fidelity` alongside the Go
+tests.
+
+**Why:** durability and determinism are the two central claims, so a regression
+in either must fail the build. The Go tests already cover the logic; this covers
+the *script* path, which spawns real processes and would otherwise rot unnoticed
+-- as it did once already, when both make targets were silent no-ops for days.
+
+**Cost:** about a minute of CI time, and a flaky chaos run would block merges.
+The script fails when no run was resumed, so it cannot pass by accident.
+
+---
+
+### Every number carries its command, hardware and date
+
+**Chose:** `docs/NUMBERS.md` is the only source for any figure quoted anywhere.
+
+**Why:** a benchmark number with no method is a claim, not a measurement. The
+rule is that a figure without a row there does not get stated -- in the README,
+on a resume, or in an interview.
+
+**Cost:** more friction quoting a number, which is the point.
+
+---
+
 ### Server Components fetch; client components stay small
 
 **Chose:** pages are Server Components that await their data; only the live

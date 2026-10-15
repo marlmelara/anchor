@@ -92,6 +92,24 @@ jobs:
       - name: Verify projections match the event log
         run: go run ./cmd/anchorctl rebuild -verify
 
+      # The chaos demo end to end, not only the Go chaos tests. It spawns real
+      # worker processes and SIGKILLs them, and fails if a run is lost, an
+      # effect is applied more than once, or no run was ever interrupted -- a
+      # green chaos run that interrupted nothing proves nothing.
+      - name: Chaos demo
+        run: ./scripts/chaos.sh 24 3 12
+
+      # Replay fidelity is NOT run here as a separate step, deliberately.
+      #
+      # TestFidelityOverACorpusOfRuns already replays a 200-run corpus of mixed
+      # shapes under `go test -race` above -- a stronger check than a 20-run CLI
+      # sweep, and one that needs no orchestration. The CLI path additionally
+      # requires a live worker to execute the replays and a schema holding
+      # completed runs, neither of which exists at this point in the job.
+      #
+      # Adding it would mean standing up a worker to re-prove something already
+      # proven more thoroughly a few lines up.
+
   frontend:
     runs-on: ubuntu-latest
     steps:

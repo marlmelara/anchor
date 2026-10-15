@@ -237,6 +237,39 @@ backend change to an event shape breaks the build rather than the live page.
 
 ---
 
+## M8 — Benchmarks, chaos in CI, shipping
+
+| # | Criterion | Status | Evidence |
+|---|---|---|---|
+| 1 | Every README and resume number traces to `NUMBERS.md` | **pass** | README quotes only figures present there, each with command, hardware and date |
+
+Delivered: k6 load tests (`loadtest/`), the benchmark harness (`make bench`),
+measured numbers in `docs/NUMBERS.md`, the chaos demo and a fidelity sweep in
+CI, and the demo video script in `docs/DEMO.md`.
+
+**Measured on an Apple M2, 8 cores**, against the mock provider at fixed
+latency:
+
+| | Steady (50/s) | Saturated (400/s) |
+|---|---|---|
+| Runs completed | 1501 / 1501 | 7968 / 7968 |
+| Throughput | 100 steps/sec | 199 steps/sec |
+| Scheduling latency p99 | 50 ms | 50 ms |
+| Queue wait | p99 250 ms | p50 30 s |
+
+At eight times the sustainable rate nothing is lost, scheduling latency is flat,
+and queue wait grows by two orders of magnitude -- the measurement that says the
+fix is more workers rather than a faster worker.
+
+**Two benchmark bugs, one dangerous.** The quantile extraction first used GNU
+awk's three-argument `match`, which BSD awk on macOS lacks -- that failed
+loudly. The second treated a labelled histogram's two series as one list and
+reported a 50 ms model call as a **1 ms p99** -- which looked plausible and
+could have gone straight into a README. Caught only by knowing the mock latency
+was configured at 50 ms.
+
+---
+
 ## An intermittent "duplicate effect" that was the system working
 
 Found during the pre-M7 audit: `TestChaosLoopLosesNoRunsAndDuplicatesNoEffects`

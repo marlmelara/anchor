@@ -32,6 +32,20 @@ partitioned log.
 
 ## What it looks like
 
+**The crash demo.** Twenty-four runs, three workers, and a `SIGKILL` landing on
+a random worker every three seconds. Watch the pairs: every `!! kill -9` is
+followed moments later by another worker reaping the dead one's lease and
+carrying its run on from the next step. Twenty-four runs in, twenty-four runs
+out, every effect applied exactly once.
+
+![A terminal recording of the chaos demo: workers are killed with SIGKILL mid-run, surviving workers reap the expired leases and resume, and the run completes with no losses and no duplicated effects](docs/images/crash-demo.gif)
+
+Run it yourself with `make chaos`. It exits non-zero if a single run is lost or
+a single effect is applied twice, so it is wired into CI as a test rather than
+kept around as a demo.
+
+---
+
 The trace viewer ships with the runtime (`make viewer-dev`). It reads the event
 log over SSE, so a running agent's timeline fills in live.
 

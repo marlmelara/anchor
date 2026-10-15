@@ -42,7 +42,12 @@ cleanup() {
   # every background job, so a single survivor hangs the script forever -- which
   # is exactly what happened while the pid bug above was live.
   for pid in "${PIDS[@]:-}"; do
-    [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null || true
+    [ -n "$pid" ] || continue
+    kill -9 "$pid" 2>/dev/null || true
+    # Reap this one pid. Without it bash prints "Killed: 9" for each survivor
+    # as the script exits, which lands after the summary -- the last thing on
+    # screen when this is being recorded. Targeted, so the warning above holds.
+    wait "$pid" 2>/dev/null || true
   done
   # Belt and braces: anything still wearing this run's schema label.
   pkill -f "anchor-worker -id chaos-.* -schema $SCHEMA" 2>/dev/null || true

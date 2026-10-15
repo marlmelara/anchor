@@ -99,10 +99,16 @@ jobs:
       - name: Chaos demo
         run: ./scripts/chaos.sh 24 3 12
 
-      # Replay is the project's central claim, so a regression in it fails the
-      # build. The corpus is whatever the suite left behind.
-      - name: Replay fidelity
-        run: go run ./cmd/anchorctl fidelity -limit 20
+      # Replay fidelity is NOT run here as a separate step, deliberately.
+      #
+      # TestFidelityOverACorpusOfRuns already replays a 200-run corpus of mixed
+      # shapes under `go test -race` above -- a stronger check than a 20-run CLI
+      # sweep, and one that needs no orchestration. The CLI path additionally
+      # requires a live worker to execute the replays and a schema holding
+      # completed runs, neither of which exists at this point in the job.
+      #
+      # Adding it would mean standing up a worker to re-prove something already
+      # proven more thoroughly a few lines up.
 
   frontend:
     runs-on: ubuntu-latest

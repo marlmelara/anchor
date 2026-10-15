@@ -101,7 +101,8 @@ See [Milestones](#milestones).
 
 ## Quickstart
 
-Requires Go 1.27+ and Docker.
+Requires Go 1.26+ (the version in `go.mod`, which is what CI builds with)
+and Docker. The TypeScript SDK and trace viewer additionally need Node 22.
 
 ```bash
 make up        # start Postgres and Redis, wait for health

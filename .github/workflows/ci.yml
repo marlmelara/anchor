@@ -92,6 +92,30 @@ jobs:
       - name: Verify projections match the event log
         run: go run ./cmd/anchorctl rebuild -verify
 
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # The SDK is built first: the viewer imports it by file path, so a type
+      # error there must fail here rather than inside the viewer's build.
+      - name: Build and test the SDK
+        working-directory: sdk
+        run: |
+          npm install
+          npx tsc -p tsconfig.json
+          node --test --experimental-strip-types src/*.test.ts
+
+      - name: Typecheck and build the trace viewer
+        working-directory: trace-viewer
+        run: |
+          npm install
+          npx tsc --noEmit
+          npx next build
+
   lint:
     runs-on: ubuntu-latest
     steps:

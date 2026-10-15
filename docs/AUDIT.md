@@ -213,6 +213,30 @@ which segfaulted on the first test. Both in the Struggles section of
 
 ---
 
+## M7 — Trace viewer and SDK
+
+| # | Criterion | Status | Evidence |
+|---|---|---|---|
+| 1 | A run started from the SDK appears in the viewer and updates live | **pass** | `sdk/examples/quickstart.ts` drove a real run end to end against a live server. Live updates verified in a browser: a pending run's page showed `connecting` with 1 event, a worker was started, and the page filled to 9 events with no reload. |
+| 2 | Replaying from the viewer shows a clean diff | **pass** | The Replay button produced *"The replay reproduced this run exactly"* with all 9 events matching side by side |
+
+Verified by driving a real browser, not by trusting an HTTP 200. Screenshots of
+the run list, run detail with scaled duration bars, the replay diff, and the
+live fill-in were all checked.
+
+**A verification that could not have failed.** The first two attempts at the
+live-update check showed a *completed* run, because a mock run finishes in under
+a second while the page takes two to load. The page looked right and proved
+nothing. Fixed by queueing a run with no worker running, opening the page, then
+starting a worker. Both attempts before that also silently failed because
+`pkill -f 'anchor-worker'` matched nothing -- the binary had been built to
+`/tmp/aw`.
+
+CI now builds and tests the SDK and typechecks and builds the viewer, so a
+backend change to an event shape breaks the build rather than the live page.
+
+---
+
 ## An intermittent "duplicate effect" that was the system working
 
 Found during the pre-M7 audit: `TestChaosLoopLosesNoRunsAndDuplicatesNoEffects`

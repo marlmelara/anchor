@@ -32,7 +32,7 @@ partitioned log.
 
 ## Status
 
-Milestones 1 to 6 of 8 are complete. Runs are journaled, claimed from a
+Milestones 1 to 7 of 8 are complete. Runs are journaled, claimed from a
 `SKIP LOCKED` queue, and executed by a worker pool against a mock provider,
 with idempotency keys and retries. Workers that are `SIGKILL`ed lose no runs
 and duplicate no effects — proven by a chaos suite that kills real processes:
@@ -48,6 +48,7 @@ adapter sits behind the same interface as the mock:
 make live-check          # one real run against the Anthropic API
 make chaos               # kill workers, prove no runs are lost
 go run ./cmd/anchorctl fidelity   # replay a corpus and report fidelity
+make viewer-dev          # the trace viewer at localhost:3000
 ```
 
 See [Milestones](#milestones).
@@ -198,8 +199,8 @@ choice costs.
 | M4 | Docker sandbox executor with limits; tool schema validation; real LLM provider adapter. | **done** |
 | M5 | Budgets, Redis token-bucket rate limiting, circuit breaker, backpressure. Prometheus metrics. | **done** |
 | M6 | Deterministic replay end-to-end: `ReplaySource`, replay run type, divergence detection, fidelity report. | **done** |
-| M7 | Trace viewer. TypeScript SDK. | next |
-| M8 | k6 load tests, chaos suite in CI, measured benchmarks, demo video. | |
+| M7 | Trace viewer. TypeScript SDK. | **done** |
+| M8 | k6 load tests, chaos suite in CI, measured benchmarks, demo video. | next |
 
 ---
 

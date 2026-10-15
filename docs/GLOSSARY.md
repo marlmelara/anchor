@@ -92,6 +92,21 @@ milestone where it first appears, so revision can be scoped to what is built.
 | Replay | Re-running a finished run against recorded inputs instead of live ones | M6 | M6 |
 | Replay fidelity | The share of replayed runs reproducing their original exactly | The resume number | M6 |
 
+| Client Component | A React component shipped to the browser; needed for state and effects | `LiveTimeline` | M7 |
+| Discriminated union | A set of shapes told apart by one literal field | `RunEvent` | M7 |
+| `EventSource` | The browser API for consuming Server-Sent Events | Live timeline | M7 |
+| Functional update | `setState(prev => next)`, which always sees the latest state | Event appends | M7 |
+| Hook | A function like `useState` adding state or effects to a component | Trace viewer | M7 |
+| Hydration | React attaching interactivity to server-rendered HTML | Next.js pages | M7 |
+| Key (React) | A stable identity per list item so only changes are redrawn | Run and event lists | M7 |
+| Narrowing | TypeScript inferring a precise variant inside a branch | `describeEvent` | M7 |
+| Props | Inputs passed into a React component | Every component | M7 |
+| Route Handler | A server endpoint inside a Next app | SSE proxy | M7 |
+| Server Component | A React component rendered only on the server; can use secrets | Run list and detail | M7 |
+| Stale closure | A callback holding values captured from an earlier render | Avoided in the timeline | M7 |
+| Tailwind | Utility CSS classes, each applying one small style rule | All styling | M7 |
+| `"use client"` | The directive marking a module as a Client Component | Interactive components | M7 |
+
 ## Go terms
 
 | Term | Plain-English meaning | Python equivalent | M |

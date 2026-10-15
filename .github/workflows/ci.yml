@@ -92,6 +92,18 @@ jobs:
       - name: Verify projections match the event log
         run: go run ./cmd/anchorctl rebuild -verify
 
+      # The chaos demo end to end, not only the Go chaos tests. It spawns real
+      # worker processes and SIGKILLs them, and fails if a run is lost, an
+      # effect is applied more than once, or no run was ever interrupted -- a
+      # green chaos run that interrupted nothing proves nothing.
+      - name: Chaos demo
+        run: ./scripts/chaos.sh 24 3 12
+
+      # Replay is the project's central claim, so a regression in it fails the
+      # build. The corpus is whatever the suite left behind.
+      - name: Replay fidelity
+        run: go run ./cmd/anchorctl fidelity -limit 20
+
   frontend:
     runs-on: ubuntu-latest
     steps:

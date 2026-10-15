@@ -32,7 +32,7 @@ partitioned log.
 
 ## Status
 
-Milestones 1 to 5 of 8 are complete. Runs are journaled, claimed from a
+Milestones 1 to 6 of 8 are complete. Runs are journaled, claimed from a
 `SKIP LOCKED` queue, and executed by a worker pool against a mock provider,
 with idempotency keys and retries. Workers that are `SIGKILL`ed lose no runs
 and duplicate no effects — proven by a chaos suite that kills real processes:
@@ -46,6 +46,8 @@ adapter sits behind the same interface as the mock:
 
 ```bash
 make live-check          # one real run against the Anthropic API
+make chaos               # kill workers, prove no runs are lost
+go run ./cmd/anchorctl fidelity   # replay a corpus and report fidelity
 ```
 
 See [Milestones](#milestones).
@@ -195,8 +197,8 @@ choice costs.
 | M3 | Lease expiry takeover and the reaper. Chaos script. Crash recovery proven. | **done** |
 | M4 | Docker sandbox executor with limits; tool schema validation; real LLM provider adapter. | **done** |
 | M5 | Budgets, Redis token-bucket rate limiting, circuit breaker, backpressure. Prometheus metrics. | **done** |
-| M6 | Deterministic replay end-to-end: `ReplaySource`, replay run type, divergence detection, fidelity report. | next |
-| M7 | Trace viewer. TypeScript SDK. | |
+| M6 | Deterministic replay end-to-end: `ReplaySource`, replay run type, divergence detection, fidelity report. | **done** |
+| M7 | Trace viewer. TypeScript SDK. | next |
 | M8 | k6 load tests, chaos suite in CI, measured benchmarks, demo video. | |
 
 ---
@@ -212,7 +214,7 @@ alongside the results.
 | Throughput (steps/sec at W workers) | pending M8 |
 | p99 scheduling latency (claim → start) | pending M8 |
 | Recovery time after worker kill | bounded by lease duration; measured in M8 |
-| Replay fidelity over ≥200 runs | pending M6 |
+| Replay fidelity over ≥200 runs | **100%** over 200 runs of mixed shapes (`anchorctl fidelity`) |
 | Duplicate effects under fault injection | **zero**, over 60 runs and 8+ worker kills (`make chaos`) |
 
 ---

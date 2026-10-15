@@ -323,6 +323,121 @@ at claim time rather than at execution time.
 
 ---
 
+### Replay is the same code path with swapped dependencies
+
+**Chose:** a replay is a normal run with `replay_of` set, executed by the same
+interpreter, holding sources that answer from the original's journal.
+
+**Alternative:** a dedicated replay engine that walks the recorded events.
+
+**Why:** if replay were its own code path, anything that only happened on the
+live path would be untested by replay, and anything replay did differently would
+be a divergence the real run never had. The thing being verified has to be the
+thing that actually runs. It also means replay inherits crash recovery, leases
+and idempotency for free rather than reimplementing them.
+
+**Cost:** the interpreter now carries an override for its provider and runner,
+and every future dependency it gains must be swappable too or replay silently
+reaches the real one.
+
+---
+
+### Recordings keep per-attempt outcomes
+
+**Chose:** `RecordedStep.Attempts` maps attempt number to outcome, including
+failures.
+
+**Alternative:** record each step's final result, which is what the folded state
+holds.
+
+**Why:** a step that failed once and then succeeded produces six events. A
+replay handed only the success produces three, so it diverges -- and **every run
+that ever retried would score as a fidelity failure** for no real reason. The
+recording is therefore built by walking raw events, because the fold
+deliberately collapses attempt history.
+
+**Cost:** the recording is larger, and it is a second reader of the event log
+that must be kept in step with the fold. Two consumers needing different views
+of the same log is the real lesson.
+
+---
+
+### The event signature excludes timestamps and ids
+
+**Chose:** compare event type, order, step index and attempt. Nothing else.
+
+**Why:** a replay happens later by definition, so comparing timestamps would
+make every replay diverge at its first event and the check would be worthless.
+Database ids are sequence numbers with no meaning across runs. The model's
+response bytes are *handed* to the replay, so comparing them would confirm the
+recording was read correctly -- testing the test rather than the system.
+
+**Kept:** terminal output and status, because those are **computed** by the
+interpreter rather than handed over. Identical events producing a different final
+answer means something outside the journal reached the result.
+
+**Cost:** a divergence that changes only a payload field the signature ignores
+goes undetected. The signature is the definition of "the same execution", and
+widening it later would reclassify runs that currently pass.
+
+---
+
+### Only the first divergence is reported
+
+**Chose:** the replay sources keep the first mismatch and ignore later ones.
+
+**Why:** once a replay has diverged, everything after is downstream of that one
+difference. A run that turns wrong at step 2 differs at every later step, and
+listing all of it buries the cause under its consequences.
+
+**Cost:** two independent bugs in one run show up as one, and the second is only
+visible after the first is fixed.
+
+---
+
+### Errored replays leave the fidelity denominator
+
+**Chose:** fidelity is matched / (matched + diverged). Errors are counted and
+reported separately.
+
+**Why:** a replay that never ran -- no worker, a timeout, a missing agent
+version -- says nothing about determinism. Counting it as a failure blames the
+system for a harness problem; counting it as a success inflates the number.
+
+**Cost:** a harness that errors on exactly the hard runs would report a
+flattering figure. Errors are printed alongside the percentage so the exclusion
+is visible rather than silent.
+
+---
+
+### A replay pins the original's agent version
+
+**Chose:** `SubmitReplay` copies `agent_version` from the original.
+
+**Why:** replaying last month's run against today's graph compares two different
+programs. Every difference would be reported as a determinism failure when it is
+really a deployment.
+
+**Cost:** old agent versions can never be deleted, which is already true because
+`runs` has a foreign key to `agents`.
+
+---
+
+### Replays skip rate limits and the circuit breaker
+
+**Chose:** the guard check is bypassed when a replay source is present.
+
+**Why:** a replay reaches no provider and no network, so neither applies. More
+importantly, consulting them would make a replay's event sequence depend on
+fleet state at replay time -- the exact kind of outside influence replay exists
+to rule out. A fidelity sweep during a provider outage would otherwise report
+mass divergence.
+
+**Cost:** one more branch where live and replay differ, and it has to stay
+correct. It is the only such branch.
+
+---
+
 ### Money is counted in micro-dollars
 
 **Chose:** `budget_micros` / `micros_used`, one millionth of a dollar.

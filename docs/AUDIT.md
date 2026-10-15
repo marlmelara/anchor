@@ -187,6 +187,32 @@ panels).
 
 ---
 
+## M6 — Deterministic replay
+
+| # | Criterion | Status | Evidence |
+|---|---|---|---|
+| 1 | Replaying a corpus of recorded runs produces a fidelity report | **pass** | `TestFidelityOverACorpusOfRuns` — **100% over 200 runs** of mixed shapes (plain, retried, agent_loop). `anchorctl fidelity` produces the same report from the CLI. |
+| 2 | A deliberately injected non-determinism is caught as a divergence | **pass** | `TestDivergenceIsCaughtWhenSomethingWasNotRecorded`, plus unit coverage of every divergence kind |
+
+Note on criterion 2's wording. The spec frames it as "calling `time.Now()`
+directly". In Anchor's declarative model there is no user code that could call
+it — an agent is JSON the worker interprets, which is the whole reason replay is
+provable here. The equivalent failure is simulated at its real root: a source of
+difference the journal did not capture, which is what an unrecorded clock read
+*is*. Deleting a recorded attempt reproduces that exactly, and the check catches
+it.
+
+Also covered: replay reproducing retries (including the failures), `agent_loop`
+iterations, refusal to replay an unfinished run or a replay, and comparison
+tolerance for timestamps and jsonb key order.
+
+**Two bugs found, one before any code ran.** Per-attempt recording — reasoned
+out rather than discovered — and Go's typed-nil trap in the override wiring,
+which segfaulted on the first test. Both in the Struggles section of
+`docs/learning/M6-deterministic-replay.md`.
+
+---
+
 ## Demo scripts
 
 Both `make chaos` and `make live-check` originally existed only in `.PHONY`

@@ -14,6 +14,7 @@ import (
 	"github.com/marlmelara/anchor/internal/pricing"
 	"github.com/marlmelara/anchor/internal/provider"
 	"github.com/marlmelara/anchor/internal/store"
+	"github.com/marlmelara/anchor/internal/tool"
 )
 
 type outcome int
@@ -41,7 +42,14 @@ var errLostOwnership = errors.New("lost ownership of run")
 // interpretFrom walks the graph, taking the claim time so the first step can
 // report scheduling latency -- how long a run waited between being picked up
 // and actually starting work.
-func (w *Worker) interpretFrom(ctx context.Context, st *journal.RunState, graph *agent.Graph, claimedAt time.Time) outcome {
+func (w *Worker) interpretFrom(
+	ctx context.Context,
+	st *journal.RunState,
+	graph *agent.Graph,
+	claimedAt time.Time,
+	replayProvider provider.Provider,
+	replayRunner tool.Runner,
+) outcome {
 	ex := &execution{
 		w:         w,
 		st:        st,
@@ -49,6 +57,10 @@ func (w *Worker) interpretFrom(ctx context.Context, st *journal.RunState, graph 
 		claimedAt: claimedAt,
 		outputs:   map[string]json.RawMessage{"input": nonEmptyJSON(st.Input)},
 	}
+	// These arrive already nil-or-real: the caller declares them as interface
+	// types so a non-replay run passes a genuine nil rather than a typed nil.
+	ex.overrideProvider = replayProvider
+	ex.overrideRunner = replayRunner
 
 	for _, node := range graph.Nodes {
 		if err := ex.checkCancelled(ctx); err != nil {
@@ -78,6 +90,22 @@ func (w *Worker) interpretFrom(ctx context.Context, st *journal.RunState, graph 
 }
 
 func v() journal.Versioned { return journal.Versioned{V: journal.CurrentPayloadVersion} }
+
+// modelProvider is the replay source for a replay run, the worker's provider
+// otherwise.
+func (e *execution) modelProvider() provider.Provider {
+	if e.overrideProvider != nil {
+		return e.overrideProvider
+	}
+	return e.w.provider
+}
+
+func (e *execution) runner() tool.Runner {
+	if e.overrideRunner != nil {
+		return e.overrideRunner
+	}
+	return e.w.runner
+}
 
 func nonEmptyJSON(raw json.RawMessage) json.RawMessage {
 	if len(raw) == 0 {
@@ -111,6 +139,13 @@ type execution struct {
 
 	// claimedAt is when this worker took the run, for scheduling latency.
 	claimedAt time.Time
+
+	// overrideProvider and overrideRunner are set for a replay run, which holds
+	// sources answering from the original run's journal instead of the world.
+	// Per-run rather than per-worker: one worker executes live runs and replays
+	// interchangeably, and a replay's sources are built from ITS original.
+	overrideProvider provider.Provider
+	overrideRunner   tool.Runner
 	// firstStepObserved stops the latency histogram being fed once per step.
 	firstStepObserved bool
 }
@@ -263,7 +298,11 @@ func (e *execution) modelStep(ctx context.Context, nodeID, model string, req pro
 	// than failing it: a provider that is rate limiting or briefly down is
 	// expected to recover, and failing every queued run during an outage would
 	// turn a transient problem into permanent loss.
-	if !e.stepAlreadyDone(e.cursor) {
+	// A replay reaches no provider and no network, so rate limits and the
+	// breaker do not apply to it. Consulting them would also make a replay's
+	// event sequence depend on fleet state at replay time -- the exact kind of
+	// outside influence replay exists to rule out.
+	if !e.stepAlreadyDone(e.cursor) && e.overrideProvider == nil {
 		decision, gerr := e.w.cfg.Guards.Check(ctx, e.st.TenantID)
 		if gerr != nil {
 			return provider.Response{}, fmt.Errorf("rate limit check: %w", gerr)
@@ -310,6 +349,7 @@ func (e *execution) modelStep(ctx context.Context, nodeID, model string, req pro
 	for {
 		step, _ := e.st.Step(stepIndex)
 		attempt := step.Attempt
+		req.Attempt = attempt
 
 		if err := e.append(ctx, store.PendingEvent{
 			Type: journal.TypeModelCallStarted,
@@ -330,7 +370,7 @@ func (e *execution) modelStep(ctx context.Context, nodeID, model string, req pro
 
 		callStarted := e.w.store.Now()
 		callCtx, cancel := context.WithTimeout(ctx, e.w.cfg.ModelCallTimeout)
-		resp, callErr := e.w.provider.Complete(callCtx, req)
+		resp, callErr := e.modelProvider().Complete(callCtx, req)
 		cancel()
 
 		// A cancelled run is not the provider's fault, so it must not count
@@ -526,7 +566,7 @@ func (e *execution) toolStep(ctx context.Context, nodeID, toolName string, input
 		}
 
 		toolStarted := e.w.store.Now()
-		res, runErr := e.w.runner.Run(ctx, def, input)
+		res, runErr := e.runner().Run(tool.WithPosition(ctx, stepIndex, attempt), def, input)
 		e.w.observe(func(m *metrics.Metrics) {
 			m.StepDuration.WithLabelValues("tool").Observe(e.w.store.Now().Sub(toolStarted).Seconds())
 		})

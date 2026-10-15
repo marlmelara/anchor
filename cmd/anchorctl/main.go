@@ -19,6 +19,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/marlmelara/anchor/internal/replay"
 	"github.com/marlmelara/anchor/internal/store"
 )
 
@@ -40,6 +41,8 @@ commands:
   agent-register     register an agent definition, returning its version
   submit             submit a run
   show               fold a run from its log and print the resulting state
+  replay             replay one run and report whether it reproduced exactly
+  fidelity           replay a corpus of runs and report the fidelity percentage
 
 Set ANCHOR_DATABASE_URL or pass -dsn.
 `)
@@ -70,6 +73,10 @@ func run() error {
 		return cmdSubmit(ctx, args)
 	case "show":
 		return cmdShow(ctx, args)
+	case "replay":
+		return cmdReplay(ctx, args)
+	case "fidelity":
+		return cmdFidelity(ctx, args)
 	case "-h", "--help", "help":
 		usage()
 		return nil
@@ -280,4 +287,147 @@ func cmdShow(ctx context.Context, args []string) error {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(state)
+}
+
+// cmdReplay replays one run and reports whether it reproduced exactly.
+func cmdReplay(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("replay", flag.ExitOnError)
+	dsn := fs.String("dsn", "", "postgres DSN")
+	addSchemaFlag(fs)
+	runID := fs.String("run", "", "run id to replay")
+	wait := fs.Duration("wait", 60*time.Second, "how long to wait for the replay to finish")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *runID == "" {
+		return errors.New("-run is required")
+	}
+	id, err := uuid.Parse(*runID)
+	if err != nil {
+		return fmt.Errorf("parse -run: %w", err)
+	}
+	st, err := openStore(ctx, *dsn)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+
+	res, err := replayAndCompare(ctx, st, id, *wait)
+	if err != nil {
+		return err
+	}
+	if res.Err != "" {
+		return fmt.Errorf("replay could not complete: %s", res.Err)
+	}
+	if res.Matched {
+		fmt.Printf("run %s replayed exactly (replay %s)\n", res.OriginalRunID, res.ReplayRunID)
+		return nil
+	}
+	fmt.Printf("run %s DIVERGED\n  %s\n", res.OriginalRunID, res.Divergence.Error())
+	return errors.New("replay diverged")
+}
+
+// cmdFidelity replays a corpus and reports the percentage that matched.
+func cmdFidelity(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("fidelity", flag.ExitOnError)
+	dsn := fs.String("dsn", "", "postgres DSN")
+	addSchemaFlag(fs)
+	tenant := fs.String("tenant", "", "limit to one tenant (default: all)")
+	limit := fs.Int("limit", 200, "how many runs to replay")
+	wait := fs.Duration("wait", 120*time.Second, "how long to wait for each replay")
+	asJSON := fs.Bool("json", false, "emit the full report as JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	st, err := openStore(ctx, *dsn)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+
+	ids, err := st.ReplayableRuns(ctx, *tenant, *limit)
+	if err != nil {
+		return err
+	}
+	if len(ids) == 0 {
+		return errors.New("no completed runs to replay")
+	}
+	fmt.Fprintf(os.Stderr, "replaying %d run(s)...\n", len(ids))
+
+	report := &replay.Report{}
+	for i, id := range ids {
+		res, err := replayAndCompare(ctx, st, id, *wait)
+		if err != nil {
+			res = replay.Result{OriginalRunID: id.String(), Err: err.Error()}
+		}
+		report.Add(res)
+		if (i+1)%25 == 0 {
+			fmt.Fprintf(os.Stderr, "  %d/%d\n", i+1, len(ids))
+		}
+	}
+
+	if *asJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(report)
+	}
+	fmt.Print(report.String())
+	if report.Diverged > 0 {
+		return fmt.Errorf("%d of %d replays diverged", report.Diverged, report.Matched+report.Diverged)
+	}
+	return nil
+}
+
+// replayAndCompare submits a replay, waits for it, and compares the two logs.
+func replayAndCompare(ctx context.Context, st *store.Store, originalID uuid.UUID, wait time.Duration) (replay.Result, error) {
+	res := replay.Result{OriginalRunID: originalID.String()}
+
+	originalEvents, err := st.LoadEvents(ctx, originalID)
+	if err != nil {
+		return res, fmt.Errorf("load original: %w", err)
+	}
+	rec, err := replay.Build(originalEvents)
+	if err != nil {
+		return res, fmt.Errorf("build recording: %w", err)
+	}
+
+	replayState, err := st.SubmitReplay(ctx, originalID)
+	if err != nil {
+		return res, fmt.Errorf("submit replay: %w", err)
+	}
+	res.ReplayRunID = replayState.RunID.String()
+
+	// Poll rather than subscribe: this is an operator command run occasionally,
+	// not a hot path, and polling has no connection to leak if it is
+	// interrupted.
+	deadline := time.Now().Add(wait)
+	for time.Now().Before(deadline) {
+		current, err := st.LoadState(ctx, replayState.RunID)
+		if err != nil {
+			return res, fmt.Errorf("load replay: %w", err)
+		}
+		if current.Terminal() {
+			replayEvents, err := st.LoadEvents(ctx, replayState.RunID)
+			if err != nil {
+				return res, fmt.Errorf("load replay events: %w", err)
+			}
+			if d := replay.Compare(rec, replayEvents); d != nil {
+				res.Divergence = d
+				return res, nil
+			}
+			if d := replay.CompareFinal(rec, current); d != nil {
+				res.Divergence = d
+				return res, nil
+			}
+			res.Matched = true
+			return res, nil
+		}
+		select {
+		case <-ctx.Done():
+			return res, ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+	res.Err = fmt.Sprintf("replay %s did not finish within %s (is a worker running?)", res.ReplayRunID, wait)
+	return res, nil
 }

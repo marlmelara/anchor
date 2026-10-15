@@ -54,6 +54,11 @@ type Request struct {
 	// StepIndex identifies which step this call belongs to. A replay provider
 	// uses it to find the recorded response.
 	StepIndex int `json:"step_index"`
+	// Attempt is which try this is for that step. A replay needs it as well as
+	// the index: a step that failed once and then succeeded must replay the
+	// failure too, or the replay produces a shorter event sequence than the
+	// original and diverges for a reason that is not a real bug.
+	Attempt int `json:"attempt"`
 	// MaxTokens bounds one call; the run budget bounds the whole run.
 	MaxTokens int `json:"max_tokens,omitempty"`
 }

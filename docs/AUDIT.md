@@ -368,7 +368,15 @@ would have destroyed the live-check evidence every time it ran.
   nothing to revise from later.
 - **Tests Marlon owns.** The spec assigns three suites to him with Claude
   reviewing: the fold, idempotency-key behaviour, and the replay divergence
-  check. The first two currently exist in Claude's hand
-  (`internal/journal/fold_test.go`, `internal/idem/idem_test.go`) and should be
-  rewritten from his own understanding. The third does not exist yet (M6).
+  check. As of M8 all three exist and pass, and all three were written by
+  Claude, not by Marlon — `internal/journal/fold_test.go` (45 tests),
+  `internal/idem/idem_test.go` (16), `internal/replay/divergence_test.go` (12).
+  He handed them over on 2026-10-14 to keep the build moving, on the condition
+  that they be walked back to him afterwards.
+
+  What this costs: the spec assigned these three specifically because writing
+  tests for the fold, the idempotency key and divergence detection is what
+  forces you to enumerate their edge cases. Those are also the three things an
+  interviewer is most likely to push on. Reading the suites is not the same as
+  having written them, so the walkthrough is owed and still outstanding.
 - **One PR per milestone** — M1 was committed straight to `main`.

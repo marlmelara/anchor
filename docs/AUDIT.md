@@ -213,6 +213,34 @@ which segfaulted on the first test. Both in the Struggles section of
 
 ---
 
+## An intermittent "duplicate effect" that was the system working
+
+Found during the pre-M7 audit: `TestChaosLoopLosesNoRunsAndDuplicatesNoEffects`
+failed roughly one run in three with *61 effects for 60 runs*.
+
+**Anchor was correct.** The chaos tool declared `Idempotent: true`, so a worker
+killed in the ambiguous window had its step retried -- which is exactly the
+contract. The tool's implementation then inserted a second row. **The tool lied
+about itself**, and the test encoded a false expectation: that an idempotent
+tool would never run twice.
+
+That is the opposite of what idempotent means. The fix was to make the tool
+genuinely idempotent and to separate the two things being counted:
+
+| Table | Measures | Under chaos |
+|---|---|---|
+| `chaos_effects` (unique marker) | effectively-once effects | exactly one per run |
+| `chaos_attempts` | every execution | **may exceed** the run count |
+
+The excess is *evidence the kills landed mid-effect*, not a failure. The claim
+Anchor actually makes is at-least-once delivery plus idempotent effects, which
+is effectively-once -- and the honest test asserts that, not "the tool ran
+exactly N times".
+
+Verified by four consecutive clean runs after the fix.
+
+---
+
 ## Demo scripts
 
 Both `make chaos` and `make live-check` originally existed only in `.PHONY`

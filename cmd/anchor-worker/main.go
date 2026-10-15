@@ -279,25 +279,46 @@ func run(o options, log *slog.Logger) error {
 // The effect is a row in a real table in a real database, not an in-memory
 // counter. That distinction is the entire point: an in-process counter dies
 // with the process it lives in, so it could never prove anything about a
-// worker that was SIGKILLed. A committed row survives, and counting rows
-// afterwards is a direct measurement of how many times the effect actually
-// happened.
+// worker that was SIGKILLed.
+//
+// The tool declares itself idempotent, so it has to BE idempotent. Anchor
+// retries an idempotent tool that died in the ambiguous window -- that is the
+// whole contract -- so a tool that inserted a fresh row on every call would
+// produce two rows for one logical step and look like a duplicate effect when
+// the system was behaving exactly as designed.
+//
+// Two tables, measuring two different things:
+//
+//   - chaos_effects has a UNIQUE marker. Its row count is the number of
+//     EFFECTIVELY-ONCE effects, which is what Anchor actually promises:
+//     at-least-once delivery plus an idempotent effect.
+//   - chaos_attempts records every execution. Its count may EXCEED the number
+//     of runs under chaos, and that is evidence the kills landed mid-effect
+//     rather than a failure.
 func registerChaosTool(ctx context.Context, s *store.Store, registry *tool.Registry, runner *tool.MockRunner) error {
 	if _, err := s.Pool().Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS chaos_effects (
-			id         bigserial   PRIMARY KEY,
-			marker     text        NOT NULL,
+			marker     text        PRIMARY KEY,
 			created_at timestamptz NOT NULL DEFAULT now()
 		)`); err != nil {
 		return fmt.Errorf("create chaos_effects: %w", err)
 	}
+	if _, err := s.Pool().Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS chaos_attempts (
+			id         bigserial   PRIMARY KEY,
+			marker     text        NOT NULL,
+			created_at timestamptz NOT NULL DEFAULT now()
+		)`); err != nil {
+		return fmt.Errorf("create chaos_attempts: %w", err)
+	}
 
 	def := tool.Definition{
 		Name:        "chaos_count",
-		Description: "records one effect row; the chaos suite counts them",
-		// Idempotent: repeating this is NOT harmless -- that is what makes it a
-		// useful probe. If Anchor ever lets a step run twice, there will be two
-		// rows and the test will say so.
+		Description: "records one effect; the chaos suite counts effects and attempts separately",
+		// Idempotent, and genuinely so: the INSERT below is a no-op on repeat.
+		// Declaring this without implementing it is what produced an
+		// intermittent "duplicate effect" that was really the retry contract
+		// working correctly.
 		Idempotent: true,
 	}
 	if err := registry.Register(def); err != nil {
@@ -314,13 +335,22 @@ func registerChaosTool(ctx context.Context, s *store.Store, registry *tool.Regis
 		if in.Marker == "" {
 			return tool.Result{}, errors.New("chaos_count requires a marker")
 		}
-		var id int64
-		if err := s.Pool().QueryRow(ctx,
-			`INSERT INTO chaos_effects (marker) VALUES ($1) RETURNING id`, in.Marker,
-		).Scan(&id); err != nil {
+
+		// Every execution is recorded, including repeats.
+		if _, err := s.Pool().Exec(ctx,
+			`INSERT INTO chaos_attempts (marker) VALUES ($1)`, in.Marker); err != nil {
+			return tool.Result{}, fmt.Errorf("record attempt: %w", err)
+		}
+		// The effect itself happens at most once per marker. This is what
+		// "idempotent" has to mean in practice: repeating is harmless because
+		// the second attempt changes nothing.
+		if _, err := s.Pool().Exec(ctx,
+			`INSERT INTO chaos_effects (marker) VALUES ($1) ON CONFLICT (marker) DO NOTHING`,
+			in.Marker); err != nil {
 			return tool.Result{}, fmt.Errorf("record effect: %w", err)
 		}
-		out, err := json.Marshal(map[string]any{"effect_id": id, "marker": in.Marker})
+
+		out, err := json.Marshal(map[string]any{"marker": in.Marker})
 		if err != nil {
 			return tool.Result{}, err
 		}

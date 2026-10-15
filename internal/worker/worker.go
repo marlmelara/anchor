@@ -21,6 +21,7 @@ import (
 	"github.com/marlmelara/anchor/internal/journal"
 	"github.com/marlmelara/anchor/internal/metrics"
 	"github.com/marlmelara/anchor/internal/provider"
+	"github.com/marlmelara/anchor/internal/replay"
 	"github.com/marlmelara/anchor/internal/store"
 	"github.com/marlmelara/anchor/internal/tool"
 )
@@ -285,7 +286,37 @@ func (w *Worker) executeRun(parent context.Context, runID uuid.UUID) {
 		return
 	}
 
-	outcome := w.interpretFrom(runCtx, st, graph, claimedAt)
+	// A replay run holds sources that answer from the ORIGINAL run's journal
+	// instead of the world. Everything else -- the claim, the lease, the fold,
+	// the event append -- is identical, which is the point: replay is the same
+	// code path with different dependencies, not a second implementation.
+	// Declared as INTERFACE types, not as *replay.Provider / *replay.Runner.
+	//
+	// A nil *replay.Provider assigned to a provider.Provider variable produces
+	// a non-nil interface holding a nil pointer -- Go's typed-nil trap. The
+	// receiving code's `!= nil` check then passes and the nil pointer is
+	// dereferenced on the first call. Keeping these as interfaces that are only
+	// ever assigned real values means a non-replay run leaves them genuinely
+	// nil.
+	var replayProvider provider.Provider
+	var replayRunner tool.Runner
+	if st.ReplayOf != nil {
+		originalEvents, err := w.store.LoadEvents(runCtx, *st.ReplayOf)
+		if err != nil {
+			w.failRun(runCtx, st, fmt.Sprintf("load original run %s: %v", st.ReplayOf, err))
+			return
+		}
+		rec, err := replay.Build(originalEvents)
+		if err != nil {
+			w.failRun(runCtx, st, fmt.Sprintf("build recording from run %s: %v", st.ReplayOf, err))
+			return
+		}
+		rp := replay.NewProvider(rec)
+		replayProvider = rp
+		replayRunner = replay.NewRunner(rec, rp)
+	}
+
+	outcome := w.interpretFrom(runCtx, st, graph, claimedAt, replayProvider, replayRunner)
 	if st.Terminal() {
 		w.observe(func(m *metrics.Metrics) {
 			m.RunsFinished.WithLabelValues(string(st.Status)).Inc()

@@ -85,6 +85,13 @@ milestone where it first appears, so revision can be scoped to what is built.
 | Quantile / p99 | The value 99% of observations beat; shows the tail an average hides | Benchmarks | M5 |
 | Token bucket | Tokens refill steadily, each action spends one, empty means wait | Rate limits | M5 |
 
+| Divergence | The first point where a replay differs from its original | Replay verification | M6 |
+| Divergence point | Where two runs parted, as opposed to everywhere they then differ | Replay report | M6 |
+| Event signature | The comparable shape of an event: type, order, step, attempt | `replay.Signature` | M6 |
+| Recording | Everything the original run observed, keyed by step and attempt | `replay.Recording` | M6 |
+| Replay | Re-running a finished run against recorded inputs instead of live ones | M6 | M6 |
+| Replay fidelity | The share of replayed runs reproducing their original exactly | The resume number | M6 |
+
 ## Go terms
 
 | Term | Plain-English meaning | Python equivalent | M |
@@ -100,6 +107,7 @@ milestone where it first appears, so revision can be scoped to what is built.
 | Struct | A record type with named fields | `@dataclass` | M1 |
 | Struct tag | Metadata on a field, e.g. `json:"run_id"`, controlling encoding | `Field(alias=...)` in Pydantic | M1 |
 | Zero value | The default a type gets when uninitialised: `0`, `""`, `nil` | Roughly `None`, but typed | M1 |
+| Typed nil | A nil pointer inside an interface, which makes the interface itself non-nil | Replay override wiring | M6 |
 | Goroutine | A very lightweight thread Go manages; `go f()` starts one | `asyncio.create_task`, but truly parallel | M2 |
 | Channel | A typed pipe between goroutines | `asyncio.Queue` | M2 |
 | `select` | Waits until one of several channels is ready | `asyncio.wait(..., FIRST_COMPLETED)` | M2 |

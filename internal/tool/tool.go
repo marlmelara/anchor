@@ -52,6 +52,31 @@ type Runner interface {
 	Run(ctx context.Context, def Definition, input json.RawMessage) (Result, error)
 }
 
+// callPositionKey carries which step and attempt a tool call belongs to.
+type callPositionKey struct{}
+
+// CallPosition is where a tool call sits in the run.
+type CallPosition struct {
+	StepIndex int
+	Attempt   int
+}
+
+// WithPosition tags a context with the step and attempt a tool call belongs to.
+//
+// Passed through the context rather than added to the Runner signature because
+// only the replay runner needs it -- the Docker sandbox and the mock do not --
+// and widening the interface for one implementation would make every other one
+// carry a parameter it ignores.
+func WithPosition(ctx context.Context, stepIndex, attempt int) context.Context {
+	return context.WithValue(ctx, callPositionKey{}, CallPosition{StepIndex: stepIndex, Attempt: attempt})
+}
+
+// PositionFrom reads the tool call's position, if the caller set one.
+func PositionFrom(ctx context.Context) (CallPosition, bool) {
+	p, ok := ctx.Value(callPositionKey{}).(CallPosition)
+	return p, ok
+}
+
 // Registry maps tool names to definitions.
 type Registry struct {
 	mu    sync.RWMutex

@@ -72,8 +72,12 @@ type Response struct {
 
 	PromptTokens     int64 `json:"prompt_tokens"`
 	CompletionTokens int64 `json:"completion_tokens"`
-	Cents            int64 `json:"cents"`
 
+	// No cost field. The provider API returns token counts and never cost, so
+	// a Cents/Cost field here could only ever be invented by whoever built the
+	// Response -- which is exactly how a mock came to report a cost the real
+	// adapter never did, leaving the spending budget untested. Cost is derived
+	// in one place, internal/pricing, from these token counts and the model.
 	Raw json.RawMessage `json:"raw,omitempty"`
 }
 

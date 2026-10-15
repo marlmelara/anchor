@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -95,7 +96,7 @@ func submit(t *testing.T, s *store.Store, name string, version int, input string
 	t.Helper()
 	st, err := s.SubmitRun(context.Background(), store.SubmitRequest{
 		TenantID: "acme", AgentName: name, AgentVersion: version,
-		Input: json.RawMessage(input), BudgetTokens: 100000, BudgetCents: 1000,
+		Input: json.RawMessage(input), BudgetTokens: 100000, BudgetMicros: 1000,
 	})
 	if err != nil {
 		t.Fatalf("submit: %v", err)
@@ -382,8 +383,8 @@ func TestAgentLoopRunsToolThenFinalAnswer(t *testing.T) {
 	h := newHarness(t, s)
 	// First call asks for a tool; second gives the final answer.
 	h.provider.Script = []provider.Response{
-		provider.ToolReply("echo", json.RawMessage(`{"q":"hello"}`), 10, 5, 1),
-		provider.TextReply("all done", 12, 6, 1),
+		provider.ToolReply("echo", json.RawMessage(`{"q":"hello"}`), 10, 5),
+		provider.TextReply("all done", 12, 6),
 	}
 
 	version := registerAgent(t, s, "looper", loopGraph)
@@ -668,5 +669,172 @@ func TestZombieWorkerCannotAdvanceARunItLost(t *testing.T) {
 	final := loadState(t, s, runID)
 	if final.WorkerID != "rescuer" {
 		t.Errorf("owner in the journal = %q, want rescuer", final.WorkerID)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// M5: spending budget
+// ---------------------------------------------------------------------------
+
+// pricedGraph uses a REAL model id so the price table applies. The mock
+// provider answers it; "mock" itself is priced at zero so benchmarks measure
+// Anchor rather than spend.
+const pricedGraph = `{
+  "agent": "priced",
+  "v": 1,
+  "nodes": [
+    {"id": "n1", "type": "model_call", "model": "claude-opus-5-5", "prompt": "answer {{input.topic}}"}
+  ]
+}`
+
+// The M5 acceptance criterion: a run over budget stops with BudgetExceeded.
+//
+// This is the test that could not exist before, because the cost was always
+// zero: the mock reported a cost the real adapter never did, so nothing
+// counted against a spending cap.
+func TestSpendingBudgetStopsTheRunBeforeTheCall(t *testing.T) {
+	s := testStore(t)
+	h := newHarness(t, s)
+	version := registerAgent(t, s, "priced", pricedGraph)
+
+	st, err := s.SubmitRun(context.Background(), store.SubmitRequest{
+		TenantID: "acme", AgentName: "priced", AgentVersion: version,
+		Input: json.RawMessage(`{"topic":"x"}`),
+		// 100 micro-dollars is $0.0001. One call's projected cost on Opus 5.5
+		// at the 1024-token output ceiling is about 20,000 micro-dollars, so
+		// this is refused before any money is spent.
+		BudgetMicros: 100,
+	})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+
+	runUntilDrained(t, h, []*worker.Worker{h.newWorker(t, "w-1", 1)}, 15*time.Second)
+
+	final := loadState(t, s, st.RunID)
+	if final.Status != journal.RunStatusFailed {
+		t.Fatalf("status = %q, want failed", final.Status)
+	}
+	if h.provider.Calls() != 0 {
+		t.Errorf("the provider was called %d times; a spending budget must be enforced BEFORE the call",
+			h.provider.Calls())
+	}
+	if final.MicrosUsed != 0 {
+		t.Errorf("MicrosUsed = %d, want 0", final.MicrosUsed)
+	}
+	if !strings.Contains(final.Error, "spending budget") {
+		t.Errorf("error = %q, want it to name the spending budget", final.Error)
+	}
+
+	// The breach detail must be in the log, not only in the error string.
+	events, err := s.LoadEvents(context.Background(), st.RunID)
+	if err != nil {
+		t.Fatalf("load events: %v", err)
+	}
+	var found bool
+	for _, e := range events {
+		if e.Type == journal.TypeBudgetExceeded {
+			found = true
+			if !strings.Contains(string(e.Payload), `"micros"`) {
+				t.Errorf("BudgetExceeded resource is not micros: %s", e.Payload)
+			}
+		}
+	}
+	if !found {
+		t.Error("no BudgetExceeded event was journaled")
+	}
+}
+
+// A run within its budget must record what it actually spent, so the next
+// call's check has a real figure to add to.
+func TestCompletedRunRecordsRealSpend(t *testing.T) {
+	s := testStore(t)
+	h := newHarness(t, s)
+	version := registerAgent(t, s, "priced", pricedGraph)
+
+	st, err := s.SubmitRun(context.Background(), store.SubmitRequest{
+		TenantID: "acme", AgentName: "priced", AgentVersion: version,
+		Input: json.RawMessage(`{"topic":"x"}`), BudgetMicros: 10_000_000,
+	})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+
+	runUntilDrained(t, h, []*worker.Worker{h.newWorker(t, "w-1", 1)}, 15*time.Second)
+
+	final := loadState(t, s, st.RunID)
+	if final.Status != journal.RunStatusCompleted {
+		t.Fatalf("status = %q (error %s), want completed", final.Status, final.Error)
+	}
+	// The mock reports 10 prompt and 5 completion tokens. On Opus 5.5 that is
+	// 10*$4/1M + 5*$20/1M = 40 + 100 = 140 micro-dollars.
+	if final.MicrosUsed != 140 {
+		t.Errorf("MicrosUsed = %d, want 140", final.MicrosUsed)
+	}
+	if final.CostIncomplete {
+		t.Error("CostIncomplete = true for a priced model")
+	}
+}
+
+// An unpriced model with a spending budget set must refuse, not proceed with an
+// uncountable cost. Proceeding would leave the operator believing a cap is in
+// force while nothing counts against it.
+func TestUnpricedModelRefusesWhenASpendingBudgetIsSet(t *testing.T) {
+	s := testStore(t)
+	h := newHarness(t, s)
+	const graph = `{"agent":"mystery","v":1,"nodes":[
+	  {"id":"n1","type":"model_call","model":"claude-not-a-real-model","prompt":"x"}]}`
+	version := registerAgent(t, s, "mystery", graph)
+
+	st, err := s.SubmitRun(context.Background(), store.SubmitRequest{
+		TenantID: "acme", AgentName: "mystery", AgentVersion: version,
+		Input: json.RawMessage(`{}`), BudgetMicros: 1_000_000,
+	})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+
+	runUntilDrained(t, h, []*worker.Worker{h.newWorker(t, "w-1", 1)}, 15*time.Second)
+
+	final := loadState(t, s, st.RunID)
+	if final.Status != journal.RunStatusFailed {
+		t.Fatalf("status = %q, want failed", final.Status)
+	}
+	if h.provider.Calls() != 0 {
+		t.Errorf("provider called %d times for an unpriced model under a spending budget", h.provider.Calls())
+	}
+	if !strings.Contains(final.Error, "cannot be enforced") {
+		t.Errorf("error = %q, want it to say the budget cannot be enforced", final.Error)
+	}
+}
+
+// Without a spending budget, an unpriced model still runs -- it just records
+// that the cost is unknown rather than pretending it was zero.
+func TestUnpricedModelRunsWhenNoSpendingBudgetIsSet(t *testing.T) {
+	s := testStore(t)
+	h := newHarness(t, s)
+	const graph = `{"agent":"mystery2","v":1,"nodes":[
+	  {"id":"n1","type":"model_call","model":"claude-not-a-real-model","prompt":"x"}]}`
+	version := registerAgent(t, s, "mystery2", graph)
+
+	st, err := s.SubmitRun(context.Background(), store.SubmitRequest{
+		TenantID: "acme", AgentName: "mystery2", AgentVersion: version,
+		Input: json.RawMessage(`{}`), BudgetTokens: 100000,
+	})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+
+	runUntilDrained(t, h, []*worker.Worker{h.newWorker(t, "w-1", 1)}, 15*time.Second)
+
+	final := loadState(t, s, st.RunID)
+	if final.Status != journal.RunStatusCompleted {
+		t.Fatalf("status = %q (error %s), want completed", final.Status, final.Error)
+	}
+	if !final.CostIncomplete {
+		t.Error("CostIncomplete = false; an unpriced call makes the total a lower bound, not the cost")
+	}
+	if final.MicrosUsed != 0 {
+		t.Errorf("MicrosUsed = %d, want 0 -- unknown, not estimated", final.MicrosUsed)
 	}
 }

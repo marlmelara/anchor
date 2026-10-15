@@ -216,7 +216,7 @@ func cmdSubmit(ctx context.Context, args []string) error {
 	version := fs.Int("agent-version", 0, "agent version (default: latest)")
 	input := fs.String("input", "{}", "run input as JSON")
 	budgetTokens := fs.Int64("budget-tokens", 100000, "token budget")
-	budgetCents := fs.Int64("budget-cents", 500, "cost budget in cents")
+	budgetMicros := fs.Int64("budget-micros", 500_000, "spending cap in micro-dollars (1e-6 USD); 500000 == $0.50")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -243,7 +243,7 @@ func cmdSubmit(ctx context.Context, args []string) error {
 		AgentVersion: v,
 		Input:        json.RawMessage(*input),
 		BudgetTokens: *budgetTokens,
-		BudgetCents:  *budgetCents,
+		BudgetMicros: *budgetMicros,
 	})
 	if err != nil {
 		return err

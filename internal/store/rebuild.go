@@ -113,7 +113,7 @@ func (s *Store) RebuildAll(ctx context.Context, verify bool) (*RebuildResult, er
 type projectedRun struct {
 	Status      string
 	TokensUsed  int64
-	CentsUsed   int64
+	MicrosUsed  int64
 	Error       *string
 	StepCount   int
 	StepStatus  map[int]string
@@ -128,9 +128,9 @@ func (s *Store) loadProjectedRun(ctx context.Context, runID uuid.UUID) (*project
 		StepTokens:  map[int]int64{},
 	}
 	err := s.pool.QueryRow(ctx, `
-		SELECT status, tokens_used, cents_used, error
+		SELECT status, tokens_used, micros_used, error
 		FROM runs WHERE id = $1`, runID,
-	).Scan(&p.Status, &p.TokensUsed, &p.CentsUsed, &p.Error)
+	).Scan(&p.Status, &p.TokensUsed, &p.MicrosUsed, &p.Error)
 	if err != nil {
 		return nil, fmt.Errorf("read projected run %s: %w", runID, err)
 	}
@@ -171,8 +171,8 @@ func diffRun(live *projectedRun, st *journal.RunState) []string {
 	if live.TokensUsed != st.TokensUsed {
 		add("run tokens_used: projection=%d fold=%d", live.TokensUsed, st.TokensUsed)
 	}
-	if live.CentsUsed != st.CentsUsed {
-		add("run cents_used: projection=%d fold=%d", live.CentsUsed, st.CentsUsed)
+	if live.MicrosUsed != st.MicrosUsed {
+		add("run micros_used: projection=%d fold=%d", live.MicrosUsed, st.MicrosUsed)
 	}
 	liveErr := ""
 	if live.Error != nil {

@@ -20,7 +20,7 @@ type SubmitRequest struct {
 	AgentVersion int
 	Input        json.RawMessage
 	BudgetTokens int64
-	BudgetCents  int64
+	BudgetMicros int64
 	Priority     int
 	// ReplayOf, when set, marks this run as a reproduction of another run. The
 	// worker executes it against a ReplaySource instead of live providers.
@@ -56,7 +56,7 @@ func (s *Store) SubmitRun(ctx context.Context, req SubmitRequest) (*journal.RunS
 			AgentVersion: req.AgentVersion,
 			Input:        req.Input,
 			BudgetTokens: req.BudgetTokens,
-			BudgetCents:  req.BudgetCents,
+			BudgetMicros: req.BudgetMicros,
 			ReplayOf:     req.ReplayOf,
 		},
 	}
@@ -91,7 +91,7 @@ type RunSummary struct {
 	AgentVersion int        `json:"agent_version"`
 	Status       string     `json:"status"`
 	TokensUsed   int64      `json:"tokens_used"`
-	CentsUsed    int64      `json:"cents_used"`
+	MicrosUsed   int64      `json:"micros_used"`
 	CreatedAt    time.Time  `json:"created_at"`
 	StartedAt    *time.Time `json:"started_at,omitempty"`
 	FinishedAt   *time.Time `json:"finished_at,omitempty"`
@@ -108,7 +108,7 @@ func (s *Store) ListRuns(ctx context.Context, tenantID string, limit int) ([]Run
 	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT id, tenant_id, agent_name, agent_version, status,
-		       tokens_used, cents_used, created_at, started_at, finished_at,
+		       tokens_used, micros_used, created_at, started_at, finished_at,
 		       error, replay_of
 		FROM runs
 		WHERE ($1 = '' OR tenant_id = $1)
@@ -123,7 +123,7 @@ func (s *Store) ListRuns(ctx context.Context, tenantID string, limit int) ([]Run
 	for rows.Next() {
 		var r RunSummary
 		if err := rows.Scan(&r.ID, &r.TenantID, &r.AgentName, &r.AgentVersion, &r.Status,
-			&r.TokensUsed, &r.CentsUsed, &r.CreatedAt, &r.StartedAt, &r.FinishedAt,
+			&r.TokensUsed, &r.MicrosUsed, &r.CreatedAt, &r.StartedAt, &r.FinishedAt,
 			&r.Error, &r.ReplayOf); err != nil {
 			return nil, fmt.Errorf("scan run: %w", err)
 		}

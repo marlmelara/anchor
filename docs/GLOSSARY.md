@@ -73,6 +73,18 @@ milestone where it first appears, so revision can be scoped to what is built.
 | Schema validation | Checking data matches a declared shape before using it | `ValidatingRunner` | M4 |
 | stdcopy | Docker's multiplexed stream carrying stdout and stderr together | Reading tool output | M4 |
 
+| Cardinality | How many distinct label combinations a metric has | Metric design | M5 |
+| Circuit breaker | Stops calling a failing service, then tests it with one call | Per provider | M5 |
+| Fail open / fail closed | What a safety component does when it itself breaks | Breaker vs limiter | M5 |
+| Gauge vs counter | A gauge moves both ways; a counter only rises | Queue depth vs totals | M5 |
+| Half-open | The probe state: exactly one call tests recovery | Breaker | M5 |
+| Histogram | A metric bucketing observations so quantiles can be computed | Latencies | M5 |
+| Lazy refill | Computing tokens that *would* have been added, rather than a timer | Token bucket | M5 |
+| Lua script (Redis) | A program Redis runs atomically, with no interleaving | Bucket and breaker | M5 |
+| Micro-dollar | One millionth of a dollar; the unit money is counted in | `micros_used` | M5 |
+| Quantile / p99 | The value 99% of observations beat; shows the tail an average hides | Benchmarks | M5 |
+| Token bucket | Tokens refill steadily, each action spends one, empty means wait | Rate limits | M5 |
+
 ## Go terms
 
 | Term | Plain-English meaning | Python equivalent | M |

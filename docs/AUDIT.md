@@ -162,6 +162,31 @@ needs anyway.
 
 ---
 
+## M5 — Budgets, rate limits, breakers, metrics
+
+| # | Criterion | Status | Evidence |
+|---|---|---|---|
+| 1 | A run over budget stops with `BudgetExceeded` | **pass** | `TestSpendingBudgetStopsTheRunBeforeTheCall` — provider called **zero** times, `BudgetExceeded` journaled with resource `micros`. Token budget covered separately. |
+| 2 | A provider returning errors trips the breaker open, then half-open, then closed | **pass** | `TestBreakerGoesClosedToOpenToHalfOpenToClosed` (state machine, real Redis) and `TestBreakerTripsThroughTheWorkerAndParksRuns` (worker behaviour: park, do not fail) |
+| 3 | Submits return 429 above the high-water mark | **pass** | `TestSubmitReturns429AboveTheHighWaterMark`, plus `Retry-After` and the rejection counter |
+
+Also covered: real spend recorded on a completed run (140 micro-dollars for the
+mock's token counts on Opus 5.5 pricing), an unpriced model refused under a
+spending budget and permitted without one, bucket atomicity under 200 concurrent
+takes, exactly-one half-open probe under 50 concurrent callers, fail-closed
+limiter and fail-open breaker, and v1 payloads still folding after the v2 bump.
+
+**The cents gap is closed.** All three parts: the adapter never populated cost,
+nothing ever checked `BudgetCents`, and the column could not hold the value.
+Money is now micro-dollars, cost is derived in `internal/pricing` from token
+counts, and `Response.Cents` was removed so a mock cannot invent a cost the real
+adapter never produces.
+
+Grafana dashboard committed at `deploy/grafana/anchor-dashboard.json` (13
+panels).
+
+---
+
 ## Demo scripts
 
 Both `make chaos` and `make live-check` originally existed only in `.PHONY`

@@ -22,7 +22,17 @@ import (
 // how to fold. Every payload carries "v". A run recorded under an older version
 // must still replay correctly, so the fold accepts any version <= this one and
 // refuses anything newer rather than silently misreading it.
-const CurrentPayloadVersion = 1
+//
+// v2 moved money from whole cents to micro-dollars. Payloads written at v1 are
+// still read: the accessor methods below convert rather than the fold branching
+// on a version number in a dozen places.
+const CurrentPayloadVersion = 2
+
+// microsPerCent converts v1's whole-cent fields to micro-dollars.
+//
+// Defined here rather than imported from internal/pricing so the journal -- the
+// core of the system -- depends on nothing.
+const microsPerCent int64 = 10_000
 
 // EventType is the discriminator stored in run_events.type.
 type EventType string
@@ -95,10 +105,22 @@ type RunSubmittedPayload struct {
 	AgentVersion int             `json:"agent_version"`
 	Input        json.RawMessage `json:"input"`
 	BudgetTokens int64           `json:"budget_tokens"`
-	BudgetCents  int64           `json:"budget_cents"`
+	// BudgetCents is v1 only. Read it through BudgetMicroDollars.
+	BudgetCents int64 `json:"budget_cents,omitempty"`
+	// BudgetMicros is the spending cap in micro-dollars (v2+).
+	BudgetMicros int64 `json:"budget_micros,omitempty"`
 	// ReplayOf is set when this run reproduces another run against a
 	// ReplaySource rather than live providers.
 	ReplayOf *uuid.UUID `json:"replay_of,omitempty"`
+}
+
+// BudgetMicroDollars returns the run's spending cap in micro-dollars,
+// converting a v1 payload's whole-cent figure.
+func (p RunSubmittedPayload) BudgetMicroDollars() int64 {
+	if p.V >= 2 {
+		return p.BudgetMicros
+	}
+	return p.BudgetCents * microsPerCent
 }
 
 // RunStartedPayload records which worker took the run. A run can be started
@@ -154,7 +176,25 @@ type ModelCallCompletedPayload struct {
 	Response         json.RawMessage `json:"response"`
 	PromptTokens     int64           `json:"prompt_tokens"`
 	CompletionTokens int64           `json:"completion_tokens"`
-	Cents            int64           `json:"cents"`
+	// Cents is v1 only. Read cost through CostMicroDollars.
+	Cents int64 `json:"cents,omitempty"`
+	// CostMicros is what this call cost in micro-dollars (v2+). Computed by the
+	// worker from the token counts and the model's price, because the provider
+	// API returns tokens and never cost.
+	CostMicros int64 `json:"cost_micros,omitempty"`
+	// CostUnknown is set when the model had no entry in the price table. The
+	// cost is NOT zero, it is unmeasured -- recording the difference is what
+	// stops a budget silently passing over an unpriced model.
+	CostUnknown bool `json:"cost_unknown,omitempty"`
+}
+
+// CostMicroDollars returns the call's cost in micro-dollars, reading whichever
+// field this payload's version carries.
+func (p ModelCallCompletedPayload) CostMicroDollars() int64 {
+	if p.V >= 2 {
+		return p.CostMicros
+	}
+	return p.Cents * microsPerCent
 }
 
 // TotalTokens is what counts against the run's token budget.
@@ -213,7 +253,7 @@ type RetryScheduledPayload struct {
 // the model to behave.
 type BudgetExceededPayload struct {
 	Versioned
-	// Resource is "tokens" or "cents".
+	// Resource is "tokens" or "micros". ("cents" appears in v1 payloads.)
 	Resource  string `json:"resource"`
 	Limit     int64  `json:"limit"`
 	Used      int64  `json:"used"`

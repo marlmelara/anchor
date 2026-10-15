@@ -41,13 +41,13 @@ verify: ## Check the projections against the fold without changing them
 	go run ./cmd/anchorctl rebuild -verify
 
 test: up migrate ## Run every test, including those needing Postgres and Docker
-	ANCHOR_TEST_DATABASE_URL="$(DSN)" ANCHOR_TEST_DOCKER=1 go test ./...
+	ANCHOR_TEST_DATABASE_URL="$(DSN)" ANCHOR_TEST_REDIS_URL="$(REDIS)" ANCHOR_TEST_DOCKER=1 go test ./...
 
 test-unit: ## Run only the tests that need no database
 	go test ./internal/journal/ ./internal/idem/
 
 test-race: up migrate ## Run every test under the race detector
-	ANCHOR_TEST_DATABASE_URL="$(DSN)" ANCHOR_TEST_DOCKER=1 go test -race ./...
+	ANCHOR_TEST_DATABASE_URL="$(DSN)" ANCHOR_TEST_REDIS_URL="$(REDIS)" ANCHOR_TEST_DOCKER=1 go test -race ./...
 
 chaos: up migrate ## Run the chaos demo: kill workers and prove no runs are lost
 	./scripts/chaos.sh
@@ -77,7 +77,7 @@ tidy-check: ## Fail if go.mod or go.sum are not tidy
 	git diff --exit-code go.mod go.sum
 
 ci: tidy-check lint up migrate ## Run everything CI runs, locally
-	ANCHOR_TEST_DATABASE_URL="$(DSN)" ANCHOR_TEST_DOCKER=1 go test -race -count=1 ./...
+	ANCHOR_TEST_DATABASE_URL="$(DSN)" ANCHOR_TEST_REDIS_URL="$(REDIS)" ANCHOR_TEST_DOCKER=1 go test -race -count=1 ./...
 	go run ./cmd/anchorctl rebuild -verify
 
 build: ## Build all binaries into ./bin

@@ -169,7 +169,7 @@ func TestChaosLoopLosesNoRunsAndDuplicatesNoEffects(t *testing.T) {
 		st, err := env.store.SubmitRun(ctx, store.SubmitRequest{
 			TenantID: "chaos", AgentName: "chaos", AgentVersion: version,
 			Input:        json.RawMessage(fmt.Sprintf(`{"marker":%q}`, marker)),
-			BudgetTokens: 100000, BudgetCents: 1000,
+			BudgetTokens: 100000, BudgetMicros: 1_000_000,
 		})
 		if err != nil {
 			t.Fatalf("submit: %v", err)
@@ -326,7 +326,7 @@ func TestRollingRestartStrandsNoRuns(t *testing.T) {
 		if _, err := env.store.SubmitRun(ctx, store.SubmitRequest{
 			TenantID: "chaos", AgentName: "chaos", AgentVersion: version,
 			Input:        json.RawMessage(fmt.Sprintf(`{"marker":"roll-%02d"}`, i)),
-			BudgetTokens: 100000, BudgetCents: 1000,
+			BudgetTokens: 100000, BudgetMicros: 1_000_000,
 		}); err != nil {
 			t.Fatalf("submit: %v", err)
 		}

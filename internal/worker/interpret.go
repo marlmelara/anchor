@@ -10,6 +10,8 @@ import (
 
 	"github.com/marlmelara/anchor/internal/agent"
 	"github.com/marlmelara/anchor/internal/journal"
+	"github.com/marlmelara/anchor/internal/metrics"
+	"github.com/marlmelara/anchor/internal/pricing"
 	"github.com/marlmelara/anchor/internal/provider"
 	"github.com/marlmelara/anchor/internal/store"
 )
@@ -36,12 +38,16 @@ var errLostOwnership = errors.New("lost ownership of run")
 // as the walk proceeds, so a worker resuming a half-finished run replays the
 // completed prefix in memory for free and picks up at exactly the first
 // unfinished step.
-func (w *Worker) interpret(ctx context.Context, st *journal.RunState, graph *agent.Graph) outcome {
+// interpretFrom walks the graph, taking the claim time so the first step can
+// report scheduling latency -- how long a run waited between being picked up
+// and actually starting work.
+func (w *Worker) interpretFrom(ctx context.Context, st *journal.RunState, graph *agent.Graph, claimedAt time.Time) outcome {
 	ex := &execution{
-		w:       w,
-		st:      st,
-		graph:   graph,
-		outputs: map[string]json.RawMessage{"input": nonEmptyJSON(st.Input)},
+		w:         w,
+		st:        st,
+		graph:     graph,
+		claimedAt: claimedAt,
+		outputs:   map[string]json.RawMessage{"input": nonEmptyJSON(st.Input)},
 	}
 
 	for _, node := range graph.Nodes {
@@ -102,6 +108,11 @@ type execution struct {
 	// parkFor is set when a step needs to wait before its next attempt; the run
 	// is requeued rather than the worker sleeping on it.
 	parkFor time.Duration
+
+	// claimedAt is when this worker took the run, for scheduling latency.
+	claimedAt time.Time
+	// firstStepObserved stops the latency histogram being fed once per step.
+	firstStepObserved bool
 }
 
 // errBudget and errCancelled are terminal conditions that are not bugs.
@@ -229,27 +240,47 @@ func modelOutput(resp provider.Response) json.RawMessage {
 // journal, execute, journal the result, with retries.
 func (e *execution) modelStep(ctx context.Context, nodeID, model string, req provider.Request) (provider.Response, error) {
 	// Budgets are enforced in code before the call, never by asking the model
-	// to behave. The projection is deliberately pessimistic -- the per-call
-	// ceiling -- because the real completion length is unknown until after the
-	// money is spent.
+	// to behave -- a model that is misbehaving is exactly the one that will not
+	// respect an instruction to stop.
 	//
-	// Checked before the cursor advances so a refused run does not consume an
-	// index it never used.
-	if e.st.BudgetTokens > 0 {
-		projected := e.st.TokensUsed + int64(e.w.cfg.MaxTokensPerCall)
-		if projected > e.st.BudgetTokens && !e.stepAlreadyDone(e.cursor) {
-			if err := e.append(ctx,
-				store.PendingEvent{Type: journal.TypeBudgetExceeded, Payload: journal.BudgetExceededPayload{
-					Versioned: v(), Resource: "tokens",
-					Limit: e.st.BudgetTokens, Used: e.st.TokensUsed, Projected: projected,
-				}},
-				store.PendingEvent{Type: journal.TypeRunFailed, Payload: journal.RunFailedPayload{
-					Versioned: v(), Error: "token budget exceeded",
-				}},
-			); err != nil {
+	// Both projections are deliberately pessimistic: the completion length is
+	// unknown until after the money is spent, so the per-call ceiling is
+	// assumed. A check that guessed low would let the call through and discover
+	// the breach afterwards, which is what a budget exists to prevent.
+	//
+	// Checked before the cursor advances so a refused run does not consume a
+	// step index it never used.
+	if !e.stepAlreadyDone(e.cursor) {
+		if over, ev := e.budgetWouldBreach(req); over {
+			if err := e.append(ctx, ev...); err != nil {
 				return provider.Response{}, err
 			}
 			return provider.Response{}, errTerminalJournaled
+		}
+	}
+
+	// Shared protections, before anything is spent. Both park the run rather
+	// than failing it: a provider that is rate limiting or briefly down is
+	// expected to recover, and failing every queued run during an outage would
+	// turn a transient problem into permanent loss.
+	if !e.stepAlreadyDone(e.cursor) {
+		decision, gerr := e.w.cfg.Guards.Check(ctx, e.st.TenantID)
+		if gerr != nil {
+			return provider.Response{}, fmt.Errorf("rate limit check: %w", gerr)
+		}
+		e.w.observe(func(m *metrics.Metrics) {
+			m.ObserveBreakerState(e.w.cfg.Guards.Provider(), string(decision.BreakerState))
+		})
+		if !decision.Allowed {
+			e.w.cfg.Logf("run %s: deferred by %s for %s", e.st.RunID, decision.Reason, decision.RetryAfter)
+			e.w.observe(func(m *metrics.Metrics) {
+				m.RateLimited.WithLabelValues(decision.Reason).Inc()
+				if decision.Reason == "breaker_open" {
+					m.BreakerRejections.WithLabelValues(e.w.cfg.Guards.Provider()).Inc()
+				}
+			})
+			e.parkFor = decision.RetryAfter
+			return provider.Response{}, errParked
 		}
 	}
 
@@ -269,9 +300,8 @@ func (e *execution) modelStep(ctx context.Context, nodeID, model string, req pro
 		// token accounting is already in the folded state, so re-adding it here
 		// would double-count.
 		return provider.Response{
-			Raw:   decision.recorded.ModelResponse,
-			Text:  textFromRecorded(decision.recorded.ModelResponse),
-			Cents: decision.recorded.Cents,
+			Raw:  decision.recorded.ModelResponse,
+			Text: textFromRecorded(decision.recorded.ModelResponse),
 		}, nil
 	}
 	stepIndex := decision.index
@@ -291,22 +321,58 @@ func (e *execution) modelStep(ctx context.Context, nodeID, model string, req pro
 			return provider.Response{}, err
 		}
 
+		if !e.firstStepObserved {
+			e.firstStepObserved = true
+			e.w.observe(func(m *metrics.Metrics) {
+				m.SchedulingLatency.Observe(e.w.store.Now().Sub(e.claimedAt).Seconds())
+			})
+		}
+
+		callStarted := e.w.store.Now()
 		callCtx, cancel := context.WithTimeout(ctx, e.w.cfg.ModelCallTimeout)
 		resp, callErr := e.w.provider.Complete(callCtx, req)
 		cancel()
 
+		// A cancelled run is not the provider's fault, so it must not count
+		// against the breaker -- a deploy that cancels in-flight work would
+		// otherwise trip every breaker in the fleet.
+		if ctx.Err() == nil {
+			if state, rerr := e.w.cfg.Guards.Record(ctx, callErr == nil); rerr == nil {
+				e.w.observe(func(m *metrics.Metrics) {
+					m.ObserveBreakerState(e.w.cfg.Guards.Provider(), string(state))
+				})
+			}
+		}
+		e.w.observe(func(m *metrics.Metrics) {
+			m.StepDuration.WithLabelValues("model").Observe(e.w.store.Now().Sub(callStarted).Seconds())
+		})
+
 		if callErr == nil {
+			// The provider returns token counts, never cost. Money is computed
+			// here from the price table; an unpriced model records
+			// cost_unknown rather than a zero, because a silent zero is what
+			// makes a budget look enforced when it is not.
+			costMicros, costErr := pricing.Cost(model, resp.PromptTokens, resp.CompletionTokens)
+			unknown := costErr != nil
+			if unknown {
+				e.w.cfg.Logf("run %s step %d: %v", e.st.RunID, stepIndex, costErr)
+			}
 			if err := e.append(ctx, store.PendingEvent{
 				Type: journal.TypeModelCallCompleted,
 				Payload: journal.ModelCallCompletedPayload{
 					Versioned: v(), StepIndex: stepIndex, Attempt: attempt,
 					Model: model, Response: nonEmptyJSON(resp.Raw),
 					PromptTokens: resp.PromptTokens, CompletionTokens: resp.CompletionTokens,
-					Cents: resp.Cents,
+					CostMicros: costMicros, CostUnknown: unknown,
 				},
 			}); err != nil {
 				return provider.Response{}, err
 			}
+			e.w.observe(func(m *metrics.Metrics) {
+				m.TokensUsed.WithLabelValues(model, "prompt").Add(float64(resp.PromptTokens))
+				m.TokensUsed.WithLabelValues(model, "completion").Add(float64(resp.CompletionTokens))
+				m.MicroDollarsSpent.WithLabelValues(model).Add(float64(costMicros))
+			})
 			return resp, nil
 		}
 
@@ -318,6 +384,68 @@ func (e *execution) modelStep(ctx context.Context, nodeID, model string, req pro
 			return provider.Response{}, errParked
 		}
 	}
+}
+
+// budgetWouldBreach reports whether this call would exceed either budget, and
+// the events to journal if so.
+//
+// A model with no price and a spending budget set is refused outright. The
+// alternative -- proceeding with an uncountable cost -- leaves the operator
+// believing a cap is in force when nothing is counting against it, which is
+// worse than having declared no cap at all.
+func (e *execution) budgetWouldBreach(req provider.Request) (bool, []store.PendingEvent) {
+	fail := func(resource string, limit, used, projected int64, reason string) (bool, []store.PendingEvent) {
+		return true, []store.PendingEvent{
+			{Type: journal.TypeBudgetExceeded, Payload: journal.BudgetExceededPayload{
+				Versioned: v(), Resource: resource,
+				Limit: limit, Used: used, Projected: projected,
+			}},
+			{Type: journal.TypeRunFailed, Payload: journal.RunFailedPayload{
+				Versioned: v(), Error: reason,
+			}},
+		}
+	}
+
+	if e.st.BudgetTokens > 0 {
+		projected := e.st.TokensUsed + int64(e.w.cfg.MaxTokensPerCall)
+		if projected > e.st.BudgetTokens {
+			return fail("tokens", e.st.BudgetTokens, e.st.TokensUsed, projected, "token budget exceeded")
+		}
+	}
+
+	if e.st.BudgetMicros > 0 {
+		callCost, err := pricing.Projected(req.Model, int64(estimateTokens(req)), int64(e.w.cfg.MaxTokensPerCall))
+		if err != nil {
+			return fail("micros", e.st.BudgetMicros, e.st.MicrosUsed, 0,
+				fmt.Sprintf("spending budget cannot be enforced: %v", err))
+		}
+		projected := e.st.MicrosUsed + callCost
+		if projected > e.st.BudgetMicros {
+			return fail("micros", e.st.BudgetMicros, e.st.MicrosUsed, projected,
+				fmt.Sprintf("spending budget exceeded: cap %s, spent %s, this call would add %s",
+					pricing.FormatMicros(e.st.BudgetMicros),
+					pricing.FormatMicros(e.st.MicrosUsed),
+					pricing.FormatMicros(callCost)))
+		}
+	}
+	return false, nil
+}
+
+// estimateTokens approximates the prompt size before the provider counts it.
+//
+// Four bytes per token is a rough industry heuristic, not a real tokenizer.
+// It only feeds the pre-call projection, which is already pessimistic on the
+// output side; the authoritative count comes back with the response and is what
+// the journal records.
+func estimateTokens(req provider.Request) int {
+	n := len(req.System)
+	for _, m := range req.Messages {
+		n += len(m.Text) + len(m.ToolResult)
+	}
+	for _, t := range req.Tools {
+		n += len(t.Name) + len(t.Description) + len(t.InputSchema)
+	}
+	return n/4 + 1
 }
 
 // stepAlreadyDone reports whether the walk has already completed this index,
@@ -397,7 +525,11 @@ func (e *execution) toolStep(ctx context.Context, nodeID, toolName string, input
 			return nil, err
 		}
 
+		toolStarted := e.w.store.Now()
 		res, runErr := e.w.runner.Run(ctx, def, input)
+		e.w.observe(func(m *metrics.Metrics) {
+			m.StepDuration.WithLabelValues("tool").Observe(e.w.store.Now().Sub(toolStarted).Seconds())
+		})
 		if runErr == nil && res.ExitCode == 0 {
 			if err := e.append(ctx, store.PendingEvent{
 				Type: journal.TypeToolCallCompleted,
@@ -613,6 +745,11 @@ func (e *execution) handleStepFailure(
 		},
 	}); err != nil {
 		return false, err
+	}
+	if step, ok := e.st.Step(stepIndex); ok {
+		e.w.observe(func(m *metrics.Metrics) {
+			m.StepsFailed.WithLabelValues(string(step.Kind), fmt.Sprintf("%t", isRetryable)).Inc()
+		})
 	}
 
 	switch {

@@ -17,8 +17,11 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
 	"github.com/marlmelara/anchor/internal/agent"
 	"github.com/marlmelara/anchor/internal/journal"
+	"github.com/marlmelara/anchor/internal/metrics"
 	"github.com/marlmelara/anchor/internal/store"
 )
 
@@ -33,6 +36,8 @@ type Config struct {
 	// tenant is explicitly out of scope.
 	APIKeys map[string]string
 	Logger  *slog.Logger
+	// Metrics is optional; when set, /metrics is served from its registry.
+	Metrics *metrics.Metrics
 }
 
 // Server holds the handlers.
@@ -57,6 +62,13 @@ func New(s *store.Store, cfg Config) *Server {
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
+	if s.cfg.Metrics != nil {
+		// Unauthenticated on purpose: a metrics endpoint is scraped by
+		// Prometheus, which does not carry a tenant API key, and it exposes no
+		// run content -- only counts and latencies.
+		mux.Handle("GET /metrics", promhttp.HandlerFor(
+			s.cfg.Metrics.Registry(), promhttp.HandlerOpts{}))
+	}
 	mux.HandleFunc("POST /v1/agents", s.auth(s.handleRegisterAgent))
 	mux.HandleFunc("POST /v1/runs", s.auth(s.handleSubmitRun))
 	mux.HandleFunc("GET /v1/runs", s.auth(s.handleListRuns))
@@ -97,6 +109,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "database unreachable")
 		return
+	}
+	if s.cfg.Metrics != nil {
+		s.cfg.Metrics.QueueDepth.Set(float64(depth))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "queue_depth": depth})
 }
@@ -140,7 +155,7 @@ type submitRunRequest struct {
 	AgentVersion int             `json:"agent_version,omitempty"`
 	Input        json.RawMessage `json:"input,omitempty"`
 	BudgetTokens int64           `json:"budget_tokens,omitempty"`
-	BudgetCents  int64           `json:"budget_cents,omitempty"`
+	BudgetMicros int64           `json:"budget_micros,omitempty"`
 	Priority     int             `json:"priority,omitempty"`
 }
 
@@ -162,6 +177,9 @@ func (s *Server) handleSubmitRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if depth >= s.cfg.QueueHighWaterMark {
+		if s.cfg.Metrics != nil {
+			s.cfg.Metrics.SubmitsRejected.Inc()
+		}
 		w.Header().Set("Retry-After", "5")
 		writeError(w, http.StatusTooManyRequests,
 			fmt.Sprintf("queue depth %d is at the high-water mark %d", depth, s.cfg.QueueHighWaterMark))
@@ -188,7 +206,7 @@ func (s *Server) handleSubmitRun(w http.ResponseWriter, r *http.Request) {
 		AgentVersion: version,
 		Input:        req.Input,
 		BudgetTokens: req.BudgetTokens,
-		BudgetCents:  req.BudgetCents,
+		BudgetMicros: req.BudgetMicros,
 		Priority:     req.Priority,
 	})
 	if err != nil {
@@ -350,9 +368,9 @@ func runView(st *journal.RunState) map[string]any {
 func runDetail(st *journal.RunState) map[string]any {
 	view := runView(st)
 	view["tokens_used"] = st.TokensUsed
-	view["cents_used"] = st.CentsUsed
+	view["micros_used"] = st.MicrosUsed
 	view["budget_tokens"] = st.BudgetTokens
-	view["budget_cents"] = st.BudgetCents
+	view["budget_micros"] = st.BudgetMicros
 	view["started_at"] = st.StartedAt
 	view["finished_at"] = st.FinishedAt
 	view["steps"] = st.Steps

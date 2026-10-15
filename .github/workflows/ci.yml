@@ -10,6 +10,7 @@ env:
   ANCHOR_TEST_DATABASE_URL: postgres://anchor:anchor@localhost:5432/anchor?sslmode=disable
   ANCHOR_DATABASE_URL: postgres://anchor:anchor@localhost:5432/anchor?sslmode=disable
   ANCHOR_REDIS_URL: redis://localhost:6379/0
+  ANCHOR_TEST_REDIS_URL: redis://localhost:6379/0
   # GitHub's ubuntu runners ship a working Docker daemon, so the sandbox tests
   # run for real in CI rather than being skipped.
   ANCHOR_TEST_DOCKER: "1"

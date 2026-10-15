@@ -23,3 +23,9 @@ documentation/
 node_modules/
 .next/
 *.tsbuildinfo
+
+# macOS / iCloud conflict copies: "stream 2.go", "package 2.json".
+# One of these was committed and broke the build with a redeclaration error,
+# while the local build had already cached a passing result.
+* [0-9].*
+*\ copy.*

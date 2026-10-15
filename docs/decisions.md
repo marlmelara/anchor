@@ -323,6 +323,106 @@ at claim time rather than at execution time.
 
 ---
 
+### Server Components fetch; client components stay small
+
+**Chose:** pages are Server Components that await their data; only the live
+timeline, the step drawer and the replay panel are Client Components.
+
+**Alternative:** a single-page app fetching everything from the browser.
+
+**Why:** the API key is read in `process.env` on the server and never ships, so
+it cannot be read out of the page source. The HTML also arrives complete -- no
+spinner, no HTML-then-JavaScript-then-fetch round trip -- and only the
+interactive parts cost bundle size (the run detail page ships ~3.4 kB of its
+own).
+
+**Cost:** two mental models in one codebase, and the boundary has to be right.
+A `process.env` read that drifts into a client component leaks a secret, and
+nothing about the syntax warns you.
+
+---
+
+### The viewer proxies SSE rather than giving the browser a key
+
+**Chose:** a Next Route Handler fetches `anchor-server`'s stream and pipes the
+body through.
+
+**Alternative:** let the browser open an `EventSource` directly against
+`anchor-server`.
+
+**Why:** `EventSource` cannot send an `Authorization` header -- it is a
+deliberately minimal API. The key would have to go in the query string, which
+puts it in server logs, browser history and any referrer. The proxy already has
+it server-side.
+
+**Cost:** an extra hop, and the Next server now holds a connection per watching
+browser. The body is piped unbuffered, so it adds latency but no delay.
+
+---
+
+### Server-Sent Events, not WebSockets
+
+**Chose:** SSE.
+
+**Why:** the viewer needs one-way server-to-browser updates, which is exactly
+what SSE is. It runs over plain HTTP, reconnects on its own, and resumes from
+`Last-Event-ID` with no application code. A WebSocket would be a second
+transport to operate for no capability the viewer uses.
+
+**Cost:** no browser-to-server channel on that connection, and some proxies
+buffer streams unless told not to (hence `X-Accel-Buffering: no`). If the viewer
+ever needs to push to the server mid-stream, this is the thing that changes.
+
+---
+
+### The SDK validates graphs as well as the server
+
+**Chose:** `defineAgent` checks the same rules the Go server checks.
+
+**Why:** a mistake caught in the editor costs nothing; the same mistake caught
+after submission has already cost a round trip. The server remains the authority
+-- a client is never trusted -- but a client that catches its own errors is a
+better client.
+
+**Cost:** two implementations of the same rules, which can drift. The server's
+version is the one that matters, so drift shows up as the SDK being wrong rather
+than as a security hole.
+
+---
+
+### `defineTool` requires `idempotent` to be declared
+
+**Chose:** no default. Omitting it throws.
+
+**Why:** neither default is safe. `true` silently permits retrying an effect
+that must not repeat -- a double charge. `false` halts runs that were fine as
+`needs_review`, waiting for a human who did not need to be involved. The author
+has to decide, because that decision is what Anchor acts on when a worker dies
+mid-effect.
+
+**Cost:** more friction writing a tool. Anchor's own chaos tool got this wrong
+-- declaring `true` without being idempotent -- and produced an intermittent
+duplicate effect, so the friction is buying something real.
+
+---
+
+### The viewer computes its own replay diff
+
+**Chose:** the diff Route Handler reads both event logs and compares them.
+
+**Alternative:** have `anchor-server` store a verdict when a replay finishes and
+display that.
+
+**Why:** the page then shows what the two journals actually say, rather than a
+cached opinion that could be stale or wrong. It also mirrors the Go
+`replay.Compare` rules exactly -- type, order, step, attempt; never timestamps
+-- so the two agree by construction.
+
+**Cost:** the comparison logic exists twice, in Go and TypeScript, and both must
+stay in step. They are each about thirty lines and tested separately.
+
+---
+
 ### Replay is the same code path with swapped dependencies
 
 **Chose:** a replay is a normal run with `replay_of` set, executed by the same

@@ -152,6 +152,10 @@ func writeSSE(w http.ResponseWriter, flusher http.Flusher, event string, id int,
 	if err != nil {
 		return
 	}
-	fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", id, event, body)
+	// The write error is discarded deliberately: the only cause here is the
+	// browser having gone away, which the loop detects through the request
+	// context on its next pass. There is nothing useful to do with it at this
+	// point and nowhere to report it to.
+	_, _ = fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", id, event, body)
 	flusher.Flush()
 }
